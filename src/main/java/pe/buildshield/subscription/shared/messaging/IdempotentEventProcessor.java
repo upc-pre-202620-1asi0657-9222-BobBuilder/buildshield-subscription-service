@@ -19,7 +19,7 @@ import java.util.function.Consumer;
  * y aplica el efecto. Si el evento ya estaba registrado lo ignora. Si el efecto falla, la transacción
  * se revierte (el evento tampoco queda registrado) y el contenedor de Kafka lo reintenta.
  *
- * <p>El efecto corre con la organización del evento en el {@code TenantContext} (rol {@value #SYSTEM_ROLE})
+ * <p>La transacción y el efecto corren con la organización del evento en el {@code TenantContext} (rol {@value #SYSTEM_ROLE})
  * y con el identificador de correlación que trajo el mensaje.
  */
 public class IdempotentEventProcessor {
@@ -52,6 +52,7 @@ public class IdempotentEventProcessor {
         TenantInfo tenant = new TenantInfo(envelope.organizationId(),
                 envelope.actorId() == null ? TenantContext.SYSTEM_USER_ID : envelope.actorId(), SYSTEM_ROLE);
         boolean[] processed = {false};
+        // La organización se fija antes de abrir la transacción: el filtro de Hibernate se activa al abrir la sesión.
         CorrelationId.runWith(correlationId, () -> TenantContext.runAs(tenant, () -> processed[0] = Boolean.TRUE.equals(
                 transactionTemplate.execute(status -> {
                     if (!processedEvents.markProcessed(envelope.eventId())) {

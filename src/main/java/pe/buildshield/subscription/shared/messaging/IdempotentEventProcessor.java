@@ -49,18 +49,18 @@ public class IdempotentEventProcessor {
 
     public boolean process(String message, String correlationId, Consumer<EventEnvelope> handler) {
         EventEnvelope envelope = parse(message);
+        TenantInfo tenant = new TenantInfo(envelope.organizationId(),
+                envelope.actorId() == null ? TenantContext.SYSTEM_USER_ID : envelope.actorId(), SYSTEM_ROLE);
         boolean[] processed = {false};
-        CorrelationId.runWith(correlationId, () -> processed[0] = Boolean.TRUE.equals(
+        CorrelationId.runWith(correlationId, () -> TenantContext.runAs(tenant, () -> processed[0] = Boolean.TRUE.equals(
                 transactionTemplate.execute(status -> {
                     if (!processedEvents.markProcessed(envelope.eventId())) {
                         log.debug("Evento {} {} ya procesado: se ignora", envelope.eventType(), envelope.eventId());
                         return false;
                     }
-                    TenantInfo tenant = new TenantInfo(envelope.organizationId(),
-                            envelope.actorId() == null ? TenantContext.SYSTEM_USER_ID : envelope.actorId(), SYSTEM_ROLE);
-                    TenantContext.runAs(tenant, () -> handler.accept(envelope));
+                    handler.accept(envelope);
                     return true;
-                })));
+                }))));
         return processed[0];
     }
 

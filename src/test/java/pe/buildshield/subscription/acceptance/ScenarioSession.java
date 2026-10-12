@@ -71,6 +71,15 @@ public class ScenarioSession {
                 response.getHeaders().getFirst("Idempotent-Replayed")));
     }
 
+    /** Envía un cuerpo tal cual (sin serializar) con cabeceras propias y sin token, como un webhook externo. */
+    public ApiResponse performRaw(ApiRequest request, String rawBody, Map<String, String> headers) {
+        RestClient.RequestBodySpec spec = http.method(request.method()).uri(request.pathAndQuery())
+                .contentType(MediaType.APPLICATION_JSON).body(rawBody);
+        headers.forEach(spec::header);
+        return spec.exchange((req, response) -> new ApiResponse(response.getStatusCode().value(),
+                new String(response.getBody().readAllBytes(), StandardCharsets.UTF_8)));
+    }
+
     public int status() {
         return lastResponse.status();
     }

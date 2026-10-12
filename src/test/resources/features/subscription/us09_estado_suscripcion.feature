@@ -23,6 +23,12 @@ Característica: US09 Consulta del estado de la suscripción y de los planes
     Y el plan "Plus" cuesta "299.00" al mes y "2990.00" al año
     Y el plan "Pro" cuesta "699.00" al mes y "6990.00" al año
 
+  Escenario: Los planes se ven sin iniciar sesión, con el ahorro del pago anual
+    Cuando consulto los planes sin iniciar sesión
+    Entonces veo los planes "Free, Plus, Pro" en ese orden
+    Y el plan "Plus" ahorra "598.00" al año, un "16.67" % frente a 12 pagos mensuales
+    Y el plan "Pro" ahorra "1398.00" al año, un "16.67" % frente a 12 pagos mensuales
+
   Escenario: Sin sesión no se consulta la suscripción
     Cuando consulto la suscripción de mi organización
     Entonces la respuesta tiene estado 401

@@ -93,6 +93,8 @@ class SubscriptionMessagingIT {
         Instant validUntil = Instant.parse(activated.at("/payload/validUntil").asText());
         Instant startedAt = Instant.parse(activated.at("/payload/startedAt").asText());
         assertThat(Duration.between(startedAt, validUntil)).isEqualTo(Duration.ofDays(14));
+        assertThat(activated.at("/payload/maxActiveWorksites").isNull()).isTrue();
+        assertThat(activated.at("/payload/reason").asText()).isEqualTo("TRIAL_STARTED");
     }
 
     @Test

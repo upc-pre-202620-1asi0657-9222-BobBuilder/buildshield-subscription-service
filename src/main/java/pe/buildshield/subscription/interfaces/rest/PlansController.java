@@ -6,9 +6,7 @@ import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.ExampleObject;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
-import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -17,12 +15,12 @@ import pe.buildshield.subscription.domain.model.Plan;
 import pe.buildshield.subscription.domain.model.PlanCode;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.List;
 
 @RestController
 @RequestMapping("/api/v1/plans")
 @Tag(name = "Planes", description = "Catálogo de planes: Free (solo prueba), Plus (hasta 5 obras activas) y Pro (ilimitadas)")
-@SecurityRequirement(name = "bearer")
 class PlansController {
 
     private final SubscriptionQueryService queries;
@@ -31,11 +29,12 @@ class PlansController {
         this.queries = queries;
     }
 
+    /** Público (sin token): lo usa la página de inicio para mostrar los precios (US08). */
     @GetMapping
-    @PreAuthorize("isAuthenticated()")
-    @Operation(summary = "Listar los planes",
-            description = "Planes con su límite de obras activas y su precio mensual y anual (anual con descuento). "
-                    + "Todos tienen las mismas funciones.")
+    @Operation(summary = "Listar los planes (público)",
+            description = "US08: planes con su límite de obras activas y su precio mensual y anual. El anual se "
+                    + "compara con doce pagos mensuales: ahorro en soles y porcentaje de descuento. Todos los planes "
+                    + "tienen las mismas funciones. No requiere sesión.")
     @ApiResponse(responseCode = "200", description = "Planes en el orden en que se muestran",
             content = @Content(array = @ArraySchema(schema = @Schema(implementation = PlanResource.class)),
                     examples = @ExampleObject(value = SubscriptionApiExamples.PLANS)))
@@ -49,12 +48,23 @@ class PlansController {
             @Schema(description = "Obras activas permitidas; nulo = ilimitadas") Integer maxActiveWorksites,
             boolean unlimitedWorksites, boolean trialOnly,
             @Schema(description = "Días de prueba gratuita (solo Free)") Integer trialDays,
-            BigDecimal monthlyPrice, BigDecimal annualPrice, BigDecimal annualDiscountPercent, String currency) {
+            @Schema(description = "Precio de un mes", example = "299.00") BigDecimal monthlyPrice,
+            @Schema(description = "Precio de un año", example = "2990.00") BigDecimal annualPrice,
+            @Schema(description = "Lo que costarían doce pagos mensuales", example = "3588.00")
+            BigDecimal twelveMonthsPrice,
+            @Schema(description = "Ahorro del pago anual frente a doce mensuales", example = "598.00")
+            BigDecimal annualSavings,
+            @Schema(description = "Descuento del pago anual en porcentaje", example = "16.67")
+            BigDecimal annualDiscountPercent,
+            @Schema(description = "Precio anual dividido entre doce meses", example = "249.17")
+            BigDecimal annualMonthlyEquivalent,
+            String currency) {
 
         static PlanResource of(Plan plan, int trialDays) {
             return new PlanResource(plan.code(), plan.name(), plan.description(), plan.maxActiveWorksites(),
                     plan.unlimited(), plan.trialOnly(), plan.trialOnly() ? trialDays : null, plan.monthlyPrice(),
-                    plan.annualPrice(), plan.annualDiscountPercent(), plan.currency());
+                    plan.annualPrice(), plan.twelveMonthsPrice(), plan.annualSavings(), plan.annualDiscountPercent(),
+                    plan.annualPrice().divide(BigDecimal.valueOf(12), 2, RoundingMode.HALF_UP), plan.currency());
         }
     }
 }

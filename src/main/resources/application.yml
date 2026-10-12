@@ -63,6 +63,10 @@ buildshield:
     # Emisor de los tokens: los emite iam con su clave privada; este servicio solo valida con la pública.
     issuer: buildshield-iam
     jwt-public-key: ${BUILDSHIELD_JWT_PUBLIC_KEY}
+    # Sin JWT: el catálogo de planes (página de inicio) y el webhook de Stripe (lo autentica su firma).
+    public-endpoints:
+      - GET /api/v1/plans
+      - POST /api/v1/subscriptions/webhooks/stripe
   # subscription no tiene escrituras desde el celular: sin tabla idempotency_keys.
   idempotency:
     enabled: false
@@ -74,3 +78,22 @@ buildshield:
     trial-days: ${SUBSCRIPTION_TRIAL_DAYS:14}
     # Cada cuánto se buscan suscripciones vencidas para publicar SubscriptionExpired.
     expiry-check-interval: ${SUBSCRIPTION_EXPIRY_CHECK_INTERVAL:PT1M}
+  # Pasarela de pagos (Stripe Checkout). Las claves llegan SOLO por variables de entorno; nunca van al repositorio.
+  payments:
+    # El modo simulado (sin Stripe) solo lo habilita el perfil local.
+    simulation-enabled: false
+    success-url: ${PAYMENTS_SUCCESS_URL:http://localhost:4200/suscripcion?pago=exitoso&session_id={CHECKOUT_SESSION_ID}}
+    cancel-url: ${PAYMENTS_CANCEL_URL:http://localhost:4200/suscripcion?pago=cancelado}
+    simulated-checkout-url: ${PAYMENTS_SIMULATED_CHECKOUT_URL:http://localhost:4200/suscripcion/pago-simulado}
+    stripe:
+      secret-key: ${STRIPE_SECRET_KEY:}
+      webhook-secret: ${STRIPE_WEBHOOK_SECRET:}
+      api-base-url: ${STRIPE_API_BASE_URL:https://api.stripe.com}
+      timeout: ${STRIPE_TIMEOUT:PT5S}
+      webhook-tolerance: ${STRIPE_WEBHOOK_TOLERANCE:PT5M}
+      # Ids de precio de Stripe (price_...). Vacíos: se envía el precio del catálogo en línea (price_data).
+      prices:
+        plus-monthly: ${STRIPE_PRICE_PLUS_MONTHLY:}
+        plus-annual: ${STRIPE_PRICE_PLUS_ANNUAL:}
+        pro-monthly: ${STRIPE_PRICE_PRO_MONTHLY:}
+        pro-annual: ${STRIPE_PRICE_PRO_ANNUAL:}

@@ -32,6 +32,11 @@ class JpaSubscriptionRepository implements SubscriptionRepository {
     }
 
     @Override
+    public Optional<UUID> findOrganizationByPaymentSubscriptionId(String paymentSubscriptionId) {
+        return jpa.findOrganizationByPaymentSubscriptionId(paymentSubscriptionId);
+    }
+
+    @Override
     public Subscription save(Subscription subscription) {
         if (subscription.id() == null) {
             return jpa.saveAndFlush(new SubscriptionJpaEntity(subscription)).toDomain();

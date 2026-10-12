@@ -14,7 +14,7 @@
     <artifactId>buildshield-subscription-service</artifactId>
     <version>0.1.0-SNAPSHOT</version>
     <name>buildshield-subscription-service</name>
-    <description>Suscripción y Pagos de BuildShield: planes Free, Plus y Pro, prueba gratuita y estado de la suscripción</description>
+    <description>Suscripción y Pagos de BuildShield: planes Free, Plus y Pro, prueba gratuita, pago con Stripe Checkout y estado de la suscripción</description>
 
     <properties>
         <java.version>21</java.version>
@@ -23,6 +23,7 @@
         <archunit.version>1.4.2</archunit.version>
         <cucumber.version>7.34.9</cucumber.version>
         <jacoco.version>0.8.15</jacoco.version>
+        <resilience4j.version>2.2.0</resilience4j.version>
         <!-- Cucumber 7.34 requiere JUnit Platform 1.13+ -->
         <junit-jupiter.version>5.14.4</junit-jupiter.version>
         <jacoco.minimum.line.coverage>0.80</jacoco.minimum.line.coverage>
@@ -75,6 +76,12 @@
         <dependency>
             <groupId>org.springframework.kafka</groupId>
             <artifactId>spring-kafka</artifactId>
+        </dependency>
+        <!-- Circuit breaker de las llamadas a Stripe -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-circuitbreaker</artifactId>
+            <version>${resilience4j.version}</version>
         </dependency>
         <dependency>
             <groupId>org.flywaydb</groupId>

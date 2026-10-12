@@ -29,8 +29,11 @@ class OpenApiDocumentationIT {
                 .andReturn().getResponse().getContentAsString());
 
         assertThat(spec.path("paths").fieldNames()).toIterable()
-                .contains("/api/v1/plans", "/api/v1/subscriptions/current");
+                .contains("/api/v1/plans", "/api/v1/subscriptions/current", "/api/v1/subscriptions/checkout",
+                        "/api/v1/subscriptions/checkout/{sessionId}/simulated-payment",
+                        "/api/v1/subscriptions/current/billing-period", "/api/v1/subscriptions/webhooks/stripe");
         assertThat(spec.at("/components/securitySchemes/bearer/scheme").asText()).isEqualTo("bearer");
-        assertThat(spec.at("/paths/~1api~1v1~1plans/get/summary").asText()).isEqualTo("Listar los planes");
+        assertThat(spec.at("/paths/~1api~1v1~1plans/get/summary").asText()).isEqualTo("Listar los planes (público)");
+        assertThat(spec.at("/paths/~1api~1v1~1plans/get/security").isMissingNode()).isTrue();
     }
 }

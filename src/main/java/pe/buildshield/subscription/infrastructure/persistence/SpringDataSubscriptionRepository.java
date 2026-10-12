@@ -20,4 +20,9 @@ interface SpringDataSubscriptionRepository extends JpaRepository<SubscriptionJpa
             ORDER BY valid_until
             """, nativeQuery = true)
     List<UUID> findOrganizationsDue(@Param("now") Instant now);
+
+    @Query(value = "SELECT organization_id FROM subscriptions WHERE payment_subscription_id = :paymentSubscriptionId",
+            nativeQuery = true)
+    Optional<UUID> findOrganizationByPaymentSubscriptionId(
+            @Param("paymentSubscriptionId") String paymentSubscriptionId);
 }

@@ -4,3 +4,9 @@
 spring:
   datasource:
     url: jdbc:postgresql://${DB_HOST:127.0.0.1}:${DB_PORT:5433}/${DB_NAME:subscription_db}
+
+buildshield:
+  payments:
+    # Sin STRIPE_SECRET_KEY, el pago es SIMULADO (no se cobra nada): la URL de checkout lleva a la web y el pago se
+    # completa con POST /api/v1/subscriptions/checkout/{sessionId}/simulated-payment. Con la clave, Stripe real.
+    simulation-enabled: ${PAYMENTS_SIMULATION_ENABLED:true}

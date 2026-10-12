@@ -14,5 +14,8 @@ public interface SubscriptionRepository {
     /** Organizaciones (de todas) con la suscripción vigente y la fecha de fin ya pasada. Solo en modo sistema. */
     List<UUID> findOrganizationsDue(Instant now);
 
+    /** Organización dueña de la suscripción de la pasarela (por ejemplo, {@code sub_...} de Stripe). Modo sistema. */
+    Optional<UUID> findOrganizationByPaymentSubscriptionId(String paymentSubscriptionId);
+
     Subscription save(Subscription subscription);
 }

@@ -20,7 +20,11 @@ class InMemorySubscriptions implements SubscriptionRepository {
 
     @Override
     public Optional<Subscription> findCurrent() {
-        return Optional.ofNullable(byOrganization.get(TenantContext.require().organizationId()));
+        // Copia, como la persistencia real: un cambio no guardado no altera lo almacenado.
+        return Optional.ofNullable(byOrganization.get(TenantContext.require().organizationId())).map(stored ->
+                Subscription.restore(stored.id(), stored.organizationId(), stored.plan(), stored.billingPeriod(),
+                        stored.status(), stored.startedAt(), stored.validUntil(), stored.expiredAt(), stored.payment(),
+                        stored.version()));
     }
 
     @Override
@@ -31,12 +35,20 @@ class InMemorySubscriptions implements SubscriptionRepository {
     }
 
     @Override
+    public Optional<UUID> findOrganizationByPaymentSubscriptionId(String paymentSubscriptionId) {
+        systemModeQueries.add(TenantContext.isSystem());
+        return byOrganization.values().stream()
+                .filter(subscription -> paymentSubscriptionId.equals(subscription.paymentSubscriptionId()))
+                .map(Subscription::organizationId).findFirst();
+    }
+
+    @Override
     public Subscription save(Subscription subscription) {
         long version = subscription.version() == null ? 0 : subscription.version() + 1;
         Subscription saved = Subscription.restore(subscription.id() == null ? UUID.randomUUID() : subscription.id(),
                 subscription.organizationId(), subscription.plan(), subscription.billingPeriod(),
                 subscription.status(), subscription.startedAt(), subscription.validUntil(), subscription.expiredAt(),
-                version);
+                subscription.payment(), version);
         byOrganization.put(saved.organizationId(), saved);
         return saved;
     }

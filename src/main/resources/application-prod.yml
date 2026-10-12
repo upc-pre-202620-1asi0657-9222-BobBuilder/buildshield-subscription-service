@@ -10,6 +10,13 @@ spring:
 buildshield:
   security:
     jwt-public-key: ${BUILDSHIELD_JWT_PUBLIC_KEY}
+  payments:
+    simulation-enabled: false
+    success-url: ${PAYMENTS_SUCCESS_URL}
+    cancel-url: ${PAYMENTS_CANCEL_URL}
+    stripe:
+      secret-key: ${STRIPE_SECRET_KEY}
+      webhook-secret: ${STRIPE_WEBHOOK_SECRET}
 
 springdoc:
   api-docs:

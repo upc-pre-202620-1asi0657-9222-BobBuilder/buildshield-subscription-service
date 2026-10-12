@@ -6,6 +6,12 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+import pe.buildshield.subscription.application.ProcessedPaymentEvents;
+import pe.buildshield.subscription.domain.model.BillingPeriod;
+import pe.buildshield.subscription.domain.model.CheckoutStatus;
+import pe.buildshield.subscription.domain.model.PaymentCheckout;
+import pe.buildshield.subscription.domain.model.PaymentCheckoutRepository;
+import pe.buildshield.subscription.domain.model.PaymentProvider;
 import pe.buildshield.subscription.domain.model.PlanCode;
 import pe.buildshield.subscription.domain.model.PlanRepository;
 import pe.buildshield.subscription.domain.model.Subscription;
@@ -33,6 +39,12 @@ class SubscriptionPersistenceIT {
 
     @Autowired
     SubscriptionRepository subscriptions;
+
+    @Autowired
+    PaymentCheckoutRepository checkouts;
+
+    @Autowired
+    ProcessedPaymentEvents processedPayments;
 
     @Autowired
     PlatformTransactionManager transactionManager;
@@ -95,6 +107,73 @@ class SubscriptionPersistenceIT {
         assertThatThrownBy(() -> TenantContext.runAs(admin(organization), () -> tx().executeWithoutResult(status ->
                 subscriptions.save(stale)))).isInstanceOf(
                 org.springframework.dao.OptimisticLockingFailureException.class);
+    }
+
+    @Test
+    void the_paid_subscription_keeps_its_payment_details_and_is_found_by_the_gateway_subscription() {
+        UUID organization = UUID.randomUUID();
+        Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        Subscription saved = TenantContext.callAs(admin(organization), () -> tx().execute(status ->
+                subscriptions.save(Subscription.startTrial(organization, now, Duration.ofDays(14)))));
+        saved.activate(PlanCode.PRO, BillingPeriod.MONTHLY, now, PaymentProvider.STRIPE, "cus_it",
+                "sub_it_" + organization);
+        saved.scheduleBillingPeriodChange(BillingPeriod.ANNUAL, now);
+        TenantContext.runAs(admin(organization), () -> tx().executeWithoutResult(status -> subscriptions.save(saved)));
+
+        Optional<Subscription> current = TenantContext.callAs(admin(organization), () -> tx().execute(status ->
+                subscriptions.findCurrent()));
+        Subscription reloaded = current.orElseThrow();
+        assertThat(reloaded.payment()).isEqualTo(saved.payment());
+        assertThat(reloaded.status().name()).isEqualTo("ACTIVE");
+        assertThat(reloaded.pendingBillingPeriod()).isEqualTo(BillingPeriod.ANNUAL);
+        Optional<UUID> owner = TenantContext.callAsSystem(() -> tx().execute(status ->
+                subscriptions.findOrganizationByPaymentSubscriptionId("sub_it_" + organization)));
+        Optional<UUID> nobody = TenantContext.callAsSystem(() -> tx().execute(status ->
+                subscriptions.findOrganizationByPaymentSubscriptionId("sub_otra")));
+        assertThat(owner).contains(organization);
+        assertThat(nobody).isEmpty();
+    }
+
+    @Test
+    void checkouts_are_isolated_by_organization_and_complete_once() {
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        Instant now = Instant.now();
+        PaymentCheckout opened = TenantContext.callAs(admin(first), () -> tx().execute(status -> checkouts.save(
+                PaymentCheckout.open(UUID.randomUUID(), first, "cs_it_" + first, PlanCode.PLUS, BillingPeriod.ANNUAL,
+                        PaymentProvider.SIMULATED, "http://localhost:4200/suscripcion/pago-simulado", now))));
+
+        assertThat(opened.id()).isNotNull();
+        Optional<PaymentCheckout> fromOther = TenantContext.callAs(admin(second), () -> tx().execute(status ->
+                checkouts.findBySessionId("cs_it_" + first)));
+        assertThat(fromOther).isEmpty();
+        List<PaymentCheckout> open = TenantContext.callAs(admin(first), () -> tx().execute(status ->
+                checkouts.findOpen()));
+        assertThat(open).extracting(PaymentCheckout::sessionId).containsExactly("cs_it_" + first);
+
+        opened.complete(now.plusSeconds(5));
+        PaymentCheckout completed = TenantContext.callAs(admin(first), () -> tx().execute(status ->
+                checkouts.save(opened)));
+        assertThat(completed.status()).isEqualTo(CheckoutStatus.COMPLETED);
+        assertThat(completed.version()).isEqualTo(1L);
+        List<PaymentCheckout> stillOpen = TenantContext.callAs(admin(first), () -> tx().execute(status ->
+                checkouts.findOpen()));
+        assertThat(stillOpen).isEmpty();
+        assertThatThrownBy(() -> TenantContext.runAs(admin(first), () -> tx().executeWithoutResult(status ->
+                checkouts.save(opened)))).isInstanceOf(org.springframework.dao.OptimisticLockingFailureException.class);
+    }
+
+    @Test
+    void a_gateway_event_is_recorded_only_once() {
+        Boolean first = TenantContext.callAsSystem(() -> tx().execute(status ->
+                processedPayments.markProcessed("evt_it_1", "invoice.paid")));
+        Boolean repeated = TenantContext.callAsSystem(() -> tx().execute(status ->
+                processedPayments.markProcessed("evt_it_1", "invoice.paid")));
+        Boolean withoutType = TenantContext.callAsSystem(() -> tx().execute(status ->
+                processedPayments.markProcessed("evt_it_2", null)));
+        assertThat(first).isTrue();
+        assertThat(repeated).isFalse();
+        assertThat(withoutType).isTrue();
     }
 
     private TransactionTemplate tx() {

@@ -12,6 +12,12 @@ buildshield:
   # Las pruebas invocan los trabajos periódicos a mano.
   scheduling:
     enabled: false
+  payments:
+    # Las pruebas usan el modo simulado y un secreto de webhook de prueba (no es una clave real).
+    simulation-enabled: true
+    stripe:
+      secret-key: ""
+      webhook-secret: whsec_test_only_not_a_real_secret
   security:
     # Par de claves RSA SOLO PARA PRUEBAS. Nunca usarlo en local ni en producción.
     jwt-public-key: |

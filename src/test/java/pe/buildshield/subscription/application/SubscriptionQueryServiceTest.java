@@ -2,6 +2,8 @@ package pe.buildshield.subscription.application;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import pe.buildshield.subscription.domain.model.BillingPeriod;
+import pe.buildshield.subscription.domain.model.PaymentProvider;
 import pe.buildshield.subscription.domain.model.Plan;
 import pe.buildshield.subscription.domain.model.PlanCode;
 import pe.buildshield.subscription.domain.model.PlanRepository;
@@ -99,6 +101,32 @@ class SubscriptionQueryServiceTest {
         assertThat(defaults.trialLength()).isEqualTo(Duration.ofDays(14));
         assertThat(defaults.expiryCheckInterval()).isEqualTo(Duration.ofMinutes(1));
         assertThat(new SubscriptionProperties(30, Duration.ofSeconds(5)).trialLength()).isEqualTo(Duration.ofDays(30));
+    }
+
+    @Test
+    void current_shows_the_paid_plan_with_its_next_billing_date_and_the_scheduled_change() {
+        Subscription paid = Subscription.startTrial(organization, NOW, Duration.ofDays(14));
+        paid.activate(PlanCode.PLUS, BillingPeriod.MONTHLY, NOW.plus(Duration.ofDays(2)), PaymentProvider.STRIPE,
+                "cus_1", "sub_1");
+        paid.scheduleBillingPeriodChange(BillingPeriod.ANNUAL, NOW.plus(Duration.ofDays(2)));
+        subscriptions.save(paid);
+        clock.advance(Duration.ofDays(3));
+
+        var view = TenantContext.callAs(admin(), queries::current);
+
+        assertThat(view.plan()).isEqualTo(plus);
+        assertThat(view.status()).isEqualTo(SubscriptionStatus.ACTIVE);
+        assertThat(view.billingPeriod()).isEqualTo(BillingPeriod.MONTHLY);
+        assertThat(view.currentPeriodStart()).isEqualTo(NOW.plus(Duration.ofDays(2)));
+        assertThat(view.nextBillingAt()).isEqualTo(view.validUntil());
+        assertThat(view.pendingBillingPeriod()).isEqualTo(BillingPeriod.ANNUAL);
+        assertThat(view.pendingChangeAt()).isEqualTo(view.validUntil());
+        assertThat(view.paymentProvider()).isEqualTo(PaymentProvider.STRIPE);
+
+        clock.advance(Duration.ofDays(40));
+        var expired = TenantContext.callAs(admin(), queries::current);
+        assertThat(expired.readOnly()).isTrue();
+        assertThat(expired.nextBillingAt()).isNull();
     }
 
     private TenantInfo admin() {

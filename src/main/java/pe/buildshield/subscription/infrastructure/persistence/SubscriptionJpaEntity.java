@@ -6,6 +6,7 @@ import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Table;
 import pe.buildshield.subscription.domain.model.BillingPeriod;
+import pe.buildshield.subscription.domain.model.PaymentProvider;
 import pe.buildshield.subscription.domain.model.PlanCode;
 import pe.buildshield.subscription.domain.model.Subscription;
 import pe.buildshield.subscription.domain.model.SubscriptionStatus;
@@ -38,6 +39,23 @@ public class SubscriptionJpaEntity extends AuditableAbstractAggregateRoot<Subscr
     @Column(name = "expired_at")
     private Instant expiredAt;
 
+    @Column(name = "current_period_start", nullable = false)
+    private Instant currentPeriodStart;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "pending_billing_period", length = 10)
+    private BillingPeriod pendingBillingPeriod;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "payment_provider", length = 10)
+    private PaymentProvider paymentProvider;
+
+    @Column(name = "payment_customer_id", length = 100)
+    private String paymentCustomerId;
+
+    @Column(name = "payment_subscription_id", length = 100)
+    private String paymentSubscriptionId;
+
     protected SubscriptionJpaEntity() {
     }
 
@@ -52,10 +70,17 @@ public class SubscriptionJpaEntity extends AuditableAbstractAggregateRoot<Subscr
         status = subscription.status();
         validUntil = subscription.validUntil();
         expiredAt = subscription.expiredAt();
+        Subscription.Payment payment = subscription.payment();
+        currentPeriodStart = payment.currentPeriodStart();
+        pendingBillingPeriod = payment.pendingBillingPeriod();
+        paymentProvider = payment.provider();
+        paymentCustomerId = payment.customerId();
+        paymentSubscriptionId = payment.providerSubscriptionId();
     }
 
     Subscription toDomain() {
         return Subscription.restore(getId(), getOrganizationId(), planCode, billingPeriod, status, startedAt,
-                validUntil, expiredAt, getVersion());
+                validUntil, expiredAt, new Subscription.Payment(currentPeriodStart, pendingBillingPeriod,
+                        paymentProvider, paymentCustomerId, paymentSubscriptionId), getVersion());
     }
 }

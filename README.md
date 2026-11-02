@@ -18,19 +18,23 @@ pago del plan con Stripe Checkout (webhook firmado), cambio entre mensual y anua
 - **Free**: solo prueba gratuita, con todas las funciones, por `SUBSCRIPTION_TRIAL_DAYS` días (14 por defecto).
 - **Plus**: hasta 5 obras activas. **Pro**: obras ilimitadas. Mismas funciones en todos los planes.
 - Mensual o anual; el anual equivale a 10 meses (16,67 % de descuento). Precios sembrados por Flyway en soles
-  (Plus S/ 299 al mes o S/ 2 990 al año, Pro S/ 699 o S/ 6 990): son supuestos de diseño, se cambian en `plans`.
+  (Plus S/ 299 al mes o S/ 2 990 al año, Pro S/ 699 o S/ 6 990): son supuestos de diseño, se cambian en `plans`
+  (`monthly_price` y `annual_discount_pct`; el precio anual se calcula y se redondea al sol).
 - Al vencer, la suscripción pasa a `EXPIRED` y se publica `SubscriptionExpired`; iam deja la cuenta en solo lectura.
   El vencimiento lo revisa un proceso periódico (`SUBSCRIPTION_EXPIRY_CHECK_INTERVAL`, un minuto por defecto).
 - Pagos (Sprint 4): `PaymentGateway` es el puerto de la pasarela y `StripeAdapter` su adaptador con la API HTTP de
   Stripe (Checkout en modo `subscription`, `Idempotency-Key`, tiempo máximo `STRIPE_TIMEOUT` y circuit breaker de
   Resilience4j: 50 % de fallas en 10 llamadas lo abre 30 s). El servicio nunca recibe ni guarda datos de tarjeta:
-  solo el id de la sesión (`cs_...`), del cliente (`cus_...`) y de la suscripción de Stripe (`sub_...`).
+  `payments` solo guarda el monto, el estado y el id de la factura de Stripe (`in_...`). El plan, la modalidad y la
+  organización viajan en los metadatos de Stripe (ver `DESVIACIONES.md`).
 - El webhook verifica `Stripe-Signature` (HMAC-SHA256 de `t.cuerpo`, tolerancia de 5 minutos), descarta los eventos
-  repetidos por su id (`payment_webhook_events`) y activa la suscripción con el plan y la modalidad de la sesión
-  guardada. `invoice.paid` de una renovación empieza el siguiente periodo y aplica el cambio de modalidad programado.
-  Con Stripe, si el cobro de la renovación se demora, la cuenta sigue operativa 3 días antes de vencer.
+  repetidos por su id (`processed_events`, consumidor `StripeWebhooks`) y activa la suscripción con el plan y la
+  modalidad de los metadatos firmados de la sesión. `invoice.paid` de una renovación empieza el siguiente periodo,
+  registra el cobro y aplica el cambio de modalidad programado. Si el cobro de la renovación se demora, la cuenta sigue
+  operativa 3 días antes de vencer. `period_end` es una fecha: el periodo pagado termina a las 00:00 UTC de ese día.
 - Cambio de modalidad (US12): se programa para el siguiente periodo de cobro (en Stripe, con un subscription schedule
-  de dos fases, sin prorrateo). Pedir la modalidad actual cancela el cambio programado.
+  de dos fases, sin prorrateo, ubicando la suscripción por `metadata['organizationId']`). Pedir la modalidad actual
+  cancela el cambio programado.
 - **Modo simulado** (solo el perfil `local`, sin `STRIPE_SECRET_KEY`): la URL de checkout lleva a la página
   `/suscripcion/pago-simulado` de la web y el pago se completa con
   `POST /api/v1/subscriptions/checkout/{sessionId}/simulated-payment`, que arma y firma el mismo evento de Stripe y lo

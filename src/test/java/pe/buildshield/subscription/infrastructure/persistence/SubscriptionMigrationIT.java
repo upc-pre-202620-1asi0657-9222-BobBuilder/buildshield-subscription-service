@@ -72,12 +72,14 @@ class SubscriptionMigrationIT {
         assertThat(((Timestamp) trial.get("created_at")).toInstant()).isEqualTo(start.toInstant());
 
         var paid = jdbc.queryForMap("""
-                SELECT p.code, s.billing_period, s.status, s.trial_ends_at, s.period_end, s.pending_billing_period
+                SELECT p.code, s.billing_period, s.status, s.trial_ends_at, s.period_end, s.pending_billing_period,
+                       s.gateway_subscription_id
                 FROM %1$s.subscriptions s JOIN %1$s.plans p ON p.id = s.plan_id WHERE s.id = ?
                 """.formatted(SCHEMA), paidSubscription);
         assertThat(paid).containsEntry("code", "PLUS").containsEntry("billing_period", "ANNUAL")
                 .containsEntry("status", "ACTIVE").containsEntry("trial_ends_at", null)
                 .containsEntry("pending_billing_period", "MONTHLY")
+                .containsEntry("gateway_subscription_id", null)
                 .containsEntry("period_end", Date.valueOf("2027-10-01"));
 
         var payments = jdbc.queryForList("""
@@ -115,7 +117,13 @@ class SubscriptionMigrationIT {
                 "annual_discount_pct");
         assertThat(columns("subscriptions")).containsExactlyInAnyOrder("id", "organization_id", "plan_id",
                 "billing_period", "status", "trial_ends_at", "period_end", "version", "created_at", "created_by",
-                "updated_at", "updated_by", "pending_billing_period");
+                "updated_at", "updated_by", "pending_billing_period", "gateway_subscription_id");
+        var gatewayId = jdbc.queryForMap("""
+                SELECT data_type, character_maximum_length, is_nullable FROM information_schema.columns
+                WHERE table_schema = ? AND table_name = 'subscriptions' AND column_name = 'gateway_subscription_id'
+                """, SCHEMA);
+        assertThat(gatewayId).containsEntry("data_type", "character varying")
+                .containsEntry("character_maximum_length", 60).containsEntry("is_nullable", "YES");
         assertThat(columns("payments")).containsExactlyInAnyOrder("id", "subscription_id", "organization_id",
                 "idempotency_key", "gateway_charge_id", "amount", "status", "failure_reason", "created_at");
         assertThat(columns("outbox_events")).containsExactlyInAnyOrder("id", "organization_id", "aggregate_id",

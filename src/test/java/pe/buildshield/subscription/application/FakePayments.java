@@ -23,6 +23,7 @@ class FakePayments implements PaymentGateway, PaymentWebhooks, ProcessedPaymentE
     PaymentProvider provider = PaymentProvider.SIMULATED;
     final List<CheckoutRequest> checkoutRequests = new ArrayList<>();
     final List<String> scheduledChanges = new ArrayList<>();
+    final List<String> scheduledSubscriptionIds = new ArrayList<>();
     final Map<String, PaymentEvent> events = new HashMap<>();
     final Set<String> processed = new HashSet<>();
     RuntimeException failure;
@@ -45,12 +46,13 @@ class FakePayments implements PaymentGateway, PaymentWebhooks, ProcessedPaymentE
     }
 
     @Override
-    public void scheduleBillingPeriodChange(UUID organizationId, Plan plan, BillingPeriod current,
-            BillingPeriod target) {
+    public void scheduleBillingPeriodChange(UUID organizationId, String gatewaySubscriptionId, Plan plan,
+            BillingPeriod current, BillingPeriod target) {
         if (failure != null) {
             throw failure;
         }
         scheduledChanges.add(organizationId + ":" + current + "->" + target);
+        scheduledSubscriptionIds.add(gatewaySubscriptionId);
     }
 
     String willDeliver(PaymentEvent event) {
@@ -71,7 +73,7 @@ class FakePayments implements PaymentGateway, PaymentWebhooks, ProcessedPaymentE
     public SignedWebhook simulateCheckoutCompleted(SimulatedSession session, UUID organizationId, Instant paidAt) {
         String key = willDeliver(PaymentEvent.checkoutCompleted("evt_sim_" + UUID.randomUUID(),
                 "checkout.session.completed", session.value(), organizationId, session.plan(), session.period(),
-                session.paymentKey(), "in_sim_" + session.paymentKey()));
+                session.paymentKey(), "in_sim_" + session.paymentKey(), "sub_sim_" + session.paymentKey()));
         return new SignedWebhook(key, "ok");
     }
 

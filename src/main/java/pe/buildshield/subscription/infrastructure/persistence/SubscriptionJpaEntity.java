@@ -43,10 +43,14 @@ public class SubscriptionJpaEntity extends AuditableAbstractAggregateRoot<Subscr
     @Column(name = "period_end")
     private LocalDate periodEnd;
 
-    /** Fuera del ER, documentado en DESVIACIONES.md: modalidad que rige desde el siguiente periodo de cobro. */
+    /** Modalidad que rige desde el siguiente periodo de cobro. */
     @Enumerated(EnumType.STRING)
     @Column(name = "pending_billing_period", length = 10)
     private BillingPeriod pendingBillingPeriod;
+
+    /** Id de la suscripción en Stripe ({@code sub_...}), o nulo si todavía no llegó en un webhook. */
+    @Column(name = "gateway_subscription_id", length = 60)
+    private String gatewaySubscriptionId;
 
     @Transient
     private Instant startedAt;
@@ -74,11 +78,13 @@ public class SubscriptionJpaEntity extends AuditableAbstractAggregateRoot<Subscr
         trialEndsAt = subscription.trialEndsAt();
         periodEnd = subscription.periodEnd();
         pendingBillingPeriod = subscription.pendingBillingPeriod();
+        gatewaySubscriptionId = subscription.gatewaySubscriptionId();
     }
 
     Subscription toDomain() {
         PlanCode code = plan.toDomain().code();
         return Subscription.restore(getId(), getOrganizationId(), code, code == PlanCode.FREE ? null : billingPeriod,
-                status, getCreatedAt(), trialEndsAt, periodEnd, pendingBillingPeriod, getVersion());
+                status, getCreatedAt(), trialEndsAt, periodEnd, pendingBillingPeriod, gatewaySubscriptionId,
+                getVersion());
     }
 }

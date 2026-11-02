@@ -27,6 +27,9 @@ public class Subscription {
     public static final String SUBSCRIPTION_NOT_ACTIVE = "SUBSCRIPTION_NOT_ACTIVE";
     public static final String INVALID_PAID_PLAN = "INVALID_PAID_PLAN";
 
+    /** Largo de {@code gateway_subscription_id} en el ER. */
+    public static final int MAX_GATEWAY_SUBSCRIPTION_ID_LENGTH = 60;
+
     private final UUID id;
     private final UUID organizationId;
     private PlanCode plan;
@@ -36,11 +39,12 @@ public class Subscription {
     private final Instant trialEndsAt;
     private LocalDate periodEnd;
     private BillingPeriod pendingBillingPeriod;
+    private String gatewaySubscriptionId;
     private final Long version;
 
     private Subscription(UUID id, UUID organizationId, PlanCode plan, BillingPeriod billingPeriod,
             SubscriptionStatus status, Instant startedAt, Instant trialEndsAt, LocalDate periodEnd,
-            BillingPeriod pendingBillingPeriod, Long version) {
+            BillingPeriod pendingBillingPeriod, String gatewaySubscriptionId, Long version) {
         this.id = id;
         this.organizationId = Objects.requireNonNull(organizationId, "organizationId");
         this.plan = Objects.requireNonNull(plan, "plan");
@@ -53,6 +57,7 @@ public class Subscription {
         this.trialEndsAt = trialEndsAt;
         this.periodEnd = periodEnd;
         this.pendingBillingPeriod = pendingBillingPeriod;
+        this.gatewaySubscriptionId = normalizeGatewayId(gatewaySubscriptionId);
         this.version = version;
     }
 
@@ -62,22 +67,25 @@ public class Subscription {
             throw new IllegalArgumentException("La prueba gratuita debe durar más que cero");
         }
         return new Subscription(null, organizationId, PlanCode.FREE, null, SubscriptionStatus.TRIAL, start,
-                start.plus(length), null, null, null);
+                start.plus(length), null, null, null, null);
     }
 
     public static Subscription restore(UUID id, UUID organizationId, PlanCode plan, BillingPeriod billingPeriod,
             SubscriptionStatus status, Instant startedAt, Instant trialEndsAt, LocalDate periodEnd,
-            BillingPeriod pendingBillingPeriod, Long version) {
+            BillingPeriod pendingBillingPeriod, String gatewaySubscriptionId, Long version) {
         return new Subscription(Objects.requireNonNull(id, "id"), organizationId, plan, billingPeriod, status,
-                startedAt, trialEndsAt, periodEnd, pendingBillingPeriod, version);
+                startedAt, trialEndsAt, periodEnd, pendingBillingPeriod, gatewaySubscriptionId, version);
     }
 
     /**
      * Pago confirmado por la pasarela: la suscripción queda activa con el plan y la modalidad pagados, el periodo
      * empieza en {@code paidAt} y la próxima fecha de cobro es el fin de ese periodo. Reemplaza la prueba o la
      * suscripción vencida y descarta cualquier cambio de modalidad pendiente.
+     *
+     * <p>Cada pago de Checkout crea otra suscripción en la pasarela, así que {@code gatewaySubscriptionId} reemplaza al
+     * guardado incluso si es nulo: es preferible buscarla por metadatos que usar la de un pago anterior.
      */
-    public void activate(PlanCode paidPlan, BillingPeriod period, Instant paidAt) {
+    public void activate(PlanCode paidPlan, BillingPeriod period, Instant paidAt, String gatewaySubscriptionId) {
         if (paidPlan == null || paidPlan == PlanCode.FREE || period == null) {
             throw new ValidationException(INVALID_PAID_PLAN, "Solo se activan los planes Plus o Pro con su modalidad");
         }
@@ -86,6 +94,7 @@ public class Subscription {
         status = SubscriptionStatus.ACTIVE;
         periodEnd = dateOf(period.periodEnd(Objects.requireNonNull(paidAt, "paidAt")));
         pendingBillingPeriod = null;
+        this.gatewaySubscriptionId = normalizeGatewayId(gatewaySubscriptionId);
     }
 
     /**
@@ -95,6 +104,14 @@ public class Subscription {
      * @return {@code true} si se aplicó un cambio de modalidad programado
      */
     public boolean renew(Instant paidAt) {
+        return renew(paidAt, null);
+    }
+
+    /**
+     * Como {@link #renew(Instant)}, con la suscripción de la pasarela que cobró. Una renovación sigue la misma
+     * suscripción: si el evento no trae el id, se conserva el guardado.
+     */
+    public boolean renew(Instant paidAt, String gatewaySubscriptionId) {
         if (!paid() || billingPeriod == null) {
             throw new ConflictException(SUBSCRIPTION_NOT_ACTIVE, "La prueba gratuita no se renueva: hay que pagar un plan");
         }
@@ -107,6 +124,10 @@ public class Subscription {
         Instant start = status != SubscriptionStatus.EXPIRED && end.isAfter(paidAt) ? end : paidAt;
         periodEnd = dateOf(billingPeriod.periodEnd(start));
         status = SubscriptionStatus.ACTIVE;
+        String charged = normalizeGatewayId(gatewaySubscriptionId);
+        if (charged != null) {
+            this.gatewaySubscriptionId = charged;
+        }
         return changed;
     }
 
@@ -241,8 +262,18 @@ public class Subscription {
         return pendingBillingPeriod;
     }
 
+    /** Id de la suscripción en la pasarela ({@code sub_...}), o nulo si todavía no llegó en un webhook. */
+    public String gatewaySubscriptionId() {
+        return gatewaySubscriptionId;
+    }
+
     public Long version() {
         return version;
+    }
+
+    /** Un id más largo que la columna no se guarda: el cambio de modalidad la ubica por metadatos. */
+    private static String normalizeGatewayId(String id) {
+        return id == null || id.length() > MAX_GATEWAY_SUBSCRIPTION_ID_LENGTH ? null : id;
     }
 
     private static LocalDate dateOf(Instant instant) {

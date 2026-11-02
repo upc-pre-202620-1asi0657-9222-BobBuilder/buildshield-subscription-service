@@ -25,7 +25,7 @@ class InMemorySubscriptions implements SubscriptionRepository {
         return Optional.ofNullable(byOrganization.get(TenantContext.require().organizationId())).map(stored ->
                 Subscription.restore(stored.id(), stored.organizationId(), stored.plan(), stored.billingPeriod(),
                         stored.status(), stored.startedAt(), stored.trialEndsAt(), stored.periodEnd(),
-                        stored.pendingBillingPeriod(), stored.version()));
+                        stored.pendingBillingPeriod(), stored.gatewaySubscriptionId(), stored.version()));
     }
 
     /** Como la consulta real: por la fecha de fin, sin el margen de cobro (lo decide el dominio después). */
@@ -43,7 +43,7 @@ class InMemorySubscriptions implements SubscriptionRepository {
         Subscription saved = Subscription.restore(subscription.id() == null ? UUID.randomUUID() : subscription.id(),
                 subscription.organizationId(), subscription.plan(), subscription.billingPeriod(),
                 subscription.status(), subscription.startedAt(), subscription.trialEndsAt(), subscription.periodEnd(),
-                subscription.pendingBillingPeriod(), version);
+                subscription.pendingBillingPeriod(), subscription.gatewaySubscriptionId(), version);
         byOrganization.put(saved.organizationId(), saved);
         return saved;
     }

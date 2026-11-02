@@ -252,7 +252,7 @@ public class SubscriptionCommandService {
         }
         payments.save(payment);
         Subscription subscription = currentSubscription();
-        subscription.activate(event.plan(), event.billingPeriod(), clock.instant());
+        subscription.activate(event.plan(), event.billingPeriod(), clock.instant(), event.gatewaySubscriptionId());
         Subscription saved = subscriptions.save(subscription);
         announce(SubscriptionEvents.SUBSCRIPTION_ACTIVATED, saved, SubscriptionEvents.REASON_PAYMENT_CONFIRMED);
         log.info("Pago confirmado: organización {} con el plan {} {} hasta {}", saved.organizationId(), saved.plan(),
@@ -284,7 +284,7 @@ public class SubscriptionCommandService {
             log.warn("Evento {}: la organización {} no tiene suscripción", event.eventId(), event.organizationId());
             return WebhookResult.IGNORED;
         }
-        boolean periodChanged = subscription.renew(clock.instant());
+        boolean periodChanged = subscription.renew(clock.instant(), event.gatewaySubscriptionId());
         Subscription saved = subscriptions.save(subscription);
         recordRenewalPayment(saved, event.eventId(), event.chargeId(), event.amount());
         announce(SubscriptionEvents.SUBSCRIPTION_ACTIVATED, saved, SubscriptionEvents.REASON_RENEWED);
@@ -313,8 +313,8 @@ public class SubscriptionCommandService {
 
     /**
      * US12: cambia entre mensual y anual a partir del siguiente periodo de cobro. Pedir la modalidad actual cancela
-     * un cambio programado. Con Stripe, el cambio se programa primero en la pasarela (fuera de la transacción) y
-     * después se guarda.
+     * un cambio programado. Con Stripe, el cambio se programa primero en la pasarela (fuera de la transacción), sobre
+     * la suscripción cuyo id guardó el webhook, y después se guarda.
      */
     public BillingPeriodChange changeBillingPeriod(BillingPeriod target) {
         Instant now = clock.instant();
@@ -325,7 +325,8 @@ public class SubscriptionCommandService {
             return outcome;
         }
         if (gateway.provider() == PaymentProvider.STRIPE) {
-            gateway.scheduleBillingPeriodChange(preview.organizationId(), plan(preview.plan()), current, target);
+            gateway.scheduleBillingPeriodChange(preview.organizationId(), preview.gatewaySubscriptionId(),
+                    plan(preview.plan()), current, target);
         }
         return transactions.execute(status -> {
             Subscription subscription = currentSubscription();

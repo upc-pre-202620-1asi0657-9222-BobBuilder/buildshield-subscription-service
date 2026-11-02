@@ -101,7 +101,7 @@ class SubscriptionPersistenceIT {
         Subscription saved = TenantContext.callAs(admin(organization), () -> tx().execute(status ->
                 subscriptions.save(Subscription.startTrial(organization, now, Duration.ofDays(1)))));
         Subscription stale = Subscription.restore(saved.id(), organization, saved.plan(), null, saved.status(),
-                saved.startedAt(), saved.trialEndsAt(), null, null, saved.version());
+                saved.startedAt(), saved.trialEndsAt(), null, null, null, saved.version());
         stale.expireIfDue(now.plus(Duration.ofDays(2)));
         TenantContext.runAs(admin(organization), () -> tx().executeWithoutResult(status -> subscriptions.save(stale)));
 
@@ -117,7 +117,7 @@ class SubscriptionPersistenceIT {
         Subscription saved = TenantContext.callAs(admin(organization), () -> tx().execute(status ->
                 subscriptions.save(Subscription.startTrial(organization, now, Duration.ofDays(14)))));
         assertThat(saved.startedAt()).isEqualTo(now);
-        saved.activate(PlanCode.PRO, BillingPeriod.MONTHLY, now);
+        saved.activate(PlanCode.PRO, BillingPeriod.MONTHLY, now, "sub_" + "x".repeat(56));
         saved.scheduleBillingPeriodChange(BillingPeriod.ANNUAL, now);
         TenantContext.runAs(admin(organization), () -> tx().executeWithoutResult(status -> subscriptions.save(saved)));
 
@@ -130,6 +130,7 @@ class SubscriptionPersistenceIT {
         assertThat(reloaded.startedAt()).isEqualTo(now);
         assertThat(reloaded.status().name()).isEqualTo("ACTIVE");
         assertThat(reloaded.pendingBillingPeriod()).isEqualTo(BillingPeriod.ANNUAL);
+        assertThat(reloaded.gatewaySubscriptionId()).isEqualTo("sub_" + "x".repeat(56)).hasSize(60);
     }
 
     @Test
@@ -141,7 +142,7 @@ class SubscriptionPersistenceIT {
                 subscriptions.save(Subscription.startTrial(trial, now, Duration.ofDays(14)))));
         Subscription saved = TenantContext.callAs(admin(paid), () -> tx().execute(status ->
                 subscriptions.save(Subscription.startTrial(paid, now, Duration.ofDays(14)))));
-        saved.activate(PlanCode.PLUS, BillingPeriod.MONTHLY, now);
+        saved.activate(PlanCode.PLUS, BillingPeriod.MONTHLY, now, null);
         TenantContext.runAs(admin(paid), () -> tx().executeWithoutResult(status -> subscriptions.save(saved)));
         Instant trialEnd = now.plus(Duration.ofDays(14));
         Instant paidEnd = saved.periodEnd().atStartOfDay(ZoneOffset.UTC).toInstant();

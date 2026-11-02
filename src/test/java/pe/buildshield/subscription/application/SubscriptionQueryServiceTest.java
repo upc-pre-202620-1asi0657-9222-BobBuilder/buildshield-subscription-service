@@ -108,7 +108,7 @@ class SubscriptionQueryServiceTest {
     void current_shows_the_paid_plan_with_its_next_billing_date_and_the_scheduled_change() {
         Subscription paid = Subscription.startTrial(organization, NOW, Duration.ofDays(14));
         gateway.provider = PaymentProvider.STRIPE;
-        paid.activate(PlanCode.PLUS, BillingPeriod.MONTHLY, NOW.plus(Duration.ofDays(2)));
+        paid.activate(PlanCode.PLUS, BillingPeriod.MONTHLY, NOW.plus(Duration.ofDays(2)), null);
         paid.scheduleBillingPeriodChange(BillingPeriod.ANNUAL, NOW.plus(Duration.ofDays(2)));
         subscriptions.save(paid);
         clock.advance(Duration.ofDays(3));

@@ -141,7 +141,7 @@ class StripeAdapterTest {
         responses.put("POST /v1/subscription_schedules", new Response(200, "{\"id\":\"sub_sched_1\"}", 0));
         responses.put("POST /v1/subscription_schedules/sub_sched_1", new Response(200, "{\"id\":\"sub_sched_1\"}", 0));
 
-        adapter(null, Duration.ofSeconds(2)).scheduleBillingPeriodChange(ORGANIZATION, PLUS, BillingPeriod.MONTHLY,
+        adapter(null, Duration.ofSeconds(2)).scheduleBillingPeriodChange(ORGANIZATION, null, PLUS, BillingPeriod.MONTHLY,
                 BillingPeriod.ANNUAL);
 
         assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/search",
@@ -161,6 +161,55 @@ class StripeAdapterTest {
     }
 
     @Test
+    void with_a_stored_id_the_subscription_is_retrieved_directly_and_the_search_is_never_called() {
+        responses.put("GET /v1/subscriptions/sub_stored", new Response(200, """
+                {"id":"sub_stored","status":"active","schedule":null,"items":{"data":[{"price":{"id":"price_m",
+                "product":"prod_1"},"current_period_start":1760200000,"current_period_end":1762878400}]}}""", 0));
+        responses.put("POST /v1/subscription_schedules", new Response(200, "{\"id\":\"sub_sched_9\"}", 0));
+        responses.put("POST /v1/subscription_schedules/sub_sched_9", new Response(200, "{\"id\":\"sub_sched_9\"}", 0));
+
+        adapter(null, Duration.ofSeconds(2)).scheduleBillingPeriodChange(ORGANIZATION, "sub_stored", PLUS,
+                BillingPeriod.MONTHLY, BillingPeriod.ANNUAL);
+
+        assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/sub_stored",
+                "/v1/subscription_schedules", "/v1/subscription_schedules/sub_sched_9");
+        assertThat(requests.get(1).form()).containsEntry("from_subscription", "sub_stored");
+        assertThat(requests.get(2).idempotencyKey()).isEqualTo("change-sub_stored-ANNUAL-1762878400");
+    }
+
+    @Test
+    void with_a_stored_id_returning_to_the_current_period_releases_the_schedule() {
+        responses.put("GET /v1/subscriptions/sub_stored", new Response(200,
+                "{\"id\":\"sub_stored\",\"status\":\"active\",\"schedule\":\"sub_sched_3\"}", 0));
+        responses.put("POST /v1/subscription_schedules/sub_sched_3/release", new Response(200, "{}", 0));
+
+        adapter(null, Duration.ofSeconds(2)).scheduleBillingPeriodChange(ORGANIZATION, "sub_stored", PLUS,
+                BillingPeriod.MONTHLY, BillingPeriod.MONTHLY);
+
+        assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/sub_stored",
+                "/v1/subscription_schedules/sub_sched_3/release");
+    }
+
+    @Test
+    void a_stored_id_that_is_canceled_or_unknown_is_unavailable_and_does_not_fall_back_to_the_search() {
+        responses.put(SEARCH, new Response(200, "{\"data\":[{\"id\":\"sub_other\",\"schedule\":null}]}", 0));
+        responses.put("GET /v1/subscriptions/sub_canceled", new Response(200,
+                "{\"id\":\"sub_canceled\",\"status\":\"canceled\"}", 0));
+        responses.put("GET /v1/subscriptions/sub_unknown", new Response(404, "{\"error\":{}}", 0));
+        StripeAdapter adapter = adapter(null, Duration.ofSeconds(2));
+
+        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, "sub_canceled", PLUS,
+                BillingPeriod.MONTHLY, BillingPeriod.ANNUAL))
+                .isInstanceOf(PaymentGateway.UnavailableException.class).hasMessageContaining("suscripción vigente");
+        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, "sub_unknown", PLUS,
+                BillingPeriod.MONTHLY, BillingPeriod.ANNUAL))
+                .isInstanceOf(PaymentGateway.UnavailableException.class).hasMessageContaining("rechazó");
+
+        assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/sub_canceled",
+                "/v1/subscriptions/sub_unknown");
+    }
+
+    @Test
     void an_existing_schedule_is_reused_and_returning_to_the_current_period_releases_it() {
         responses.put(SEARCH, new Response(200, """
                 {"data":[{"id":"sub_2","schedule":"sub_sched_2","current_period_start":10,"current_period_end":20,
@@ -171,8 +220,8 @@ class StripeAdapterTest {
                 Duration.ofSeconds(2));
         Plan pro = new Plan(PlanCode.PRO, null, new BigDecimal("699"), new BigDecimal("16.67"));
 
-        adapter.scheduleBillingPeriodChange(ORGANIZATION, pro, BillingPeriod.ANNUAL, BillingPeriod.MONTHLY);
-        adapter.scheduleBillingPeriodChange(ORGANIZATION, pro, BillingPeriod.ANNUAL, BillingPeriod.ANNUAL);
+        adapter.scheduleBillingPeriodChange(ORGANIZATION, null, pro, BillingPeriod.ANNUAL, BillingPeriod.MONTHLY);
+        adapter.scheduleBillingPeriodChange(ORGANIZATION, null, pro, BillingPeriod.ANNUAL, BillingPeriod.ANNUAL);
 
         assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/search",
                 "/v1/subscription_schedules/sub_sched_2", "/v1/subscriptions/search",
@@ -185,7 +234,7 @@ class StripeAdapterTest {
     void returning_to_the_current_period_without_schedule_does_nothing_else() {
         responses.put(SEARCH, new Response(200, "{\"data\":[{\"id\":\"sub_3\",\"schedule\":null}]}", 0));
 
-        adapter(null, Duration.ofSeconds(2)).scheduleBillingPeriodChange(ORGANIZATION, PLUS, BillingPeriod.MONTHLY,
+        adapter(null, Duration.ofSeconds(2)).scheduleBillingPeriodChange(ORGANIZATION, null, PLUS, BillingPeriod.MONTHLY,
                 BillingPeriod.MONTHLY);
 
         assertThat(requests).hasSize(1);
@@ -200,14 +249,14 @@ class StripeAdapterTest {
         assertThatThrownBy(() -> adapter.startCheckout(new PaymentGateway.CheckoutRequest(UUID.randomUUID(),
                 UUID.randomUUID(), PLUS, BillingPeriod.MONTHLY))).hasMessageContaining("no devolvió la sesión");
         responses.put(SEARCH, new Response(200, "{\"data\":[{\"id\":\"sub_4\",\"items\":{\"data\":[]}}]}", 0));
-        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, PLUS, BillingPeriod.MONTHLY,
+        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, null, PLUS, BillingPeriod.MONTHLY,
                 BillingPeriod.ANNUAL)).hasMessageContaining("periodo actual");
         responses.put(SEARCH, new Response(200, """
                 {"data":[{"id":"sub_5","items":{"data":[{"price":{"id":"price_m"},"current_period_end":99}]}}]}""", 0));
-        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, PLUS, BillingPeriod.MONTHLY,
+        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, null, PLUS, BillingPeriod.MONTHLY,
                 BillingPeriod.ANNUAL)).hasMessageContaining("no devolvió el schedule");
         responses.put(SEARCH, new Response(200, "{\"data\":[]}", 0));
-        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, PLUS, BillingPeriod.MONTHLY,
+        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, null, PLUS, BillingPeriod.MONTHLY,
                 BillingPeriod.ANNUAL)).hasMessageContaining("suscripción vigente");
     }
 
@@ -252,7 +301,7 @@ class StripeAdapterTest {
 
         assertThat(adapter.provider()).isEqualTo(PaymentProvider.STRIPE);
         assertThatThrownBy(() -> adapter.startCheckout(request())).hasMessageContaining("STRIPE_SECRET_KEY");
-        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, PLUS, BillingPeriod.MONTHLY,
+        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, null, PLUS, BillingPeriod.MONTHLY,
                 BillingPeriod.ANNUAL)).hasMessageContaining("STRIPE_SECRET_KEY");
         assertThat(requests).isEmpty();
         assertThat(StripeAdapter.cents(new BigDecimal("249.165"))).isEqualTo("24917");

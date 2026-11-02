@@ -259,7 +259,7 @@ class SubscriptionCommandServiceTest {
         var started = asAdmin(() -> commands.startCheckout(PlanCode.PRO, BillingPeriod.MONTHLY));
         String body = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_1", "checkout.session.completed",
                 started.session().sessionId(), organization, PlanCode.PRO, BillingPeriod.MONTHLY,
-                started.payment().idempotencyKey(), "in_1"));
+                started.payment().idempotencyKey(), "in_1", null));
 
         assertThatThrownBy(() -> commands.receiveWebhook(body, "firma-falsa"))
                 .isInstanceOf(InvalidPaymentWebhookException.class)
@@ -280,15 +280,15 @@ class SubscriptionCommandServiceTest {
     void webhooks_without_effect_are_recorded_and_ignored() {
         String other = payments.willDeliver(PaymentEvent.ignored("evt_2", "customer.created"));
         String noOrganization = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_3",
-                "checkout.session.completed", "cs_x", null, null, null, null, null));
+                "checkout.session.completed", "cs_x", null, null, null, null, null, null));
         String unknownRenewal = payments.willDeliver(PaymentEvent.renewalPaid("evt_4", "invoice.paid",
-                UUID.randomUUID(), "in_x", null));
+                UUID.randomUUID(), "in_x", null, null));
         String renewalWithoutOrganization = payments.willDeliver(PaymentEvent.renewalPaid("evt_5", "invoice.paid",
-                null, null, null));
+                null, null, null, null));
         String unknownSession = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_6",
-                "checkout.session.completed", "cs_de_otro_lado", organization, null, null, null, null));
+                "checkout.session.completed", "cs_de_otro_lado", organization, null, null, null, null, null));
         String unknownKey = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_7", "checkout.session.completed",
-                "cs_y", organization, PlanCode.PLUS, BillingPeriod.ANNUAL, UUID.randomUUID(), null));
+                "cs_y", organization, PlanCode.PLUS, BillingPeriod.ANNUAL, UUID.randomUUID(), null, null));
 
         assertThat(commands.receiveWebhook(other, "ok")).isEqualTo(WebhookResult.IGNORED);
         assertThat(commands.receiveWebhook(other, "ok")).isEqualTo(WebhookResult.DUPLICATE);
@@ -307,7 +307,7 @@ class SubscriptionCommandServiceTest {
         payments.provider = PaymentProvider.STRIPE;
         var started = asAdmin(() -> commands.startCheckout(PlanCode.PLUS, BillingPeriod.ANNUAL));
         String body = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_legacy", "checkout.session.completed",
-                "cs_vieja", organization, PlanCode.PLUS, BillingPeriod.ANNUAL, null, "in_legacy"));
+                "cs_vieja", organization, PlanCode.PLUS, BillingPeriod.ANNUAL, null, "in_legacy", null));
 
         assertThat(commands.receiveWebhook(body, "ok")).isEqualTo(WebhookResult.PROCESSED);
 
@@ -337,7 +337,7 @@ class SubscriptionCommandServiceTest {
 
         clock.setTo(firstEnd.plusSeconds(3600));
         String renewal = payments.willDeliver(PaymentEvent.renewalPaid("evt_r1", "invoice.paid", organization, "in_r1",
-                new BigDecimal("2990.00")));
+                new BigDecimal("2990.00"), null));
         assertThat(commands.receiveWebhook(renewal, "ok")).isEqualTo(WebhookResult.PROCESSED);
 
         Subscription renewed = subscriptions.byOrganization.get(organization);
@@ -351,6 +351,68 @@ class SubscriptionCommandServiceTest {
                     assertThat(charge.amount()).isEqualByComparingTo("2990.00");
                     assertThat(charge.subscriptionId()).isEqualTo(renewed.id());
                 });
+    }
+
+    @Test
+    void the_webhook_stores_the_gateway_subscription_id_and_the_billing_period_change_uses_it() {
+        trial();
+        payments.provider = PaymentProvider.STRIPE;
+        var started = asAdmin(() -> commands.startCheckout(PlanCode.PLUS, BillingPeriod.MONTHLY));
+        String checkout = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_a", "checkout.session.completed",
+                started.session().sessionId(), organization, PlanCode.PLUS, BillingPeriod.MONTHLY,
+                started.payment().idempotencyKey(), "in_a", "sub_a"));
+
+        assertThat(commands.receiveWebhook(checkout, "ok")).isEqualTo(WebhookResult.PROCESSED);
+        assertThat(subscriptions.byOrganization.get(organization).gatewaySubscriptionId()).isEqualTo("sub_a");
+
+        asAdmin(() -> commands.changeBillingPeriod(BillingPeriod.ANNUAL));
+        assertThat(payments.scheduledSubscriptionIds).containsExactly("sub_a");
+    }
+
+    @Test
+    void without_a_stored_id_the_gateway_is_asked_to_find_it_and_a_renewal_fills_it() {
+        trial();
+        payments.provider = PaymentProvider.STRIPE;
+        pay(PlanCode.PLUS, BillingPeriod.MONTHLY, "in_b");
+        assertThat(subscriptions.byOrganization.get(organization).gatewaySubscriptionId()).isNull();
+
+        asAdmin(() -> commands.changeBillingPeriod(BillingPeriod.ANNUAL));
+        assertThat(payments.scheduledSubscriptionIds).containsExactly((String) null);
+
+        clock.setTo(subscriptions.byOrganization.get(organization).validUntil().plusSeconds(60));
+        assertThat(commands.receiveWebhook(payments.willDeliver(PaymentEvent.renewalPaid("evt_b", "invoice.paid",
+                organization, "in_b2", null, "sub_b")), "ok")).isEqualTo(WebhookResult.PROCESSED);
+        assertThat(subscriptions.byOrganization.get(organization).gatewaySubscriptionId()).isEqualTo("sub_b");
+
+        asAdmin(() -> commands.changeBillingPeriod(BillingPeriod.MONTHLY));
+        assertThat(payments.scheduledSubscriptionIds).containsExactly(null, "sub_b");
+    }
+
+    @Test
+    void a_repeated_webhook_or_a_renewal_without_the_id_keeps_the_stored_one() {
+        trial();
+        payments.provider = PaymentProvider.STRIPE;
+        var started = asAdmin(() -> commands.startCheckout(PlanCode.PRO, BillingPeriod.MONTHLY));
+        String checkout = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_c", "checkout.session.completed",
+                started.session().sessionId(), organization, PlanCode.PRO, BillingPeriod.MONTHLY,
+                started.payment().idempotencyKey(), "in_c", "sub_c"));
+        commands.receiveWebhook(checkout, "ok");
+
+        assertThat(commands.receiveWebhook(checkout, "ok")).isEqualTo(WebhookResult.DUPLICATE);
+        commands.receiveWebhook(payments.willDeliver(PaymentEvent.renewalPaid("evt_c2", "invoice.paid", organization,
+                "in_c2", null, null)), "ok");
+
+        assertThat(subscriptions.byOrganization.get(organization).gatewaySubscriptionId()).isEqualTo("sub_c");
+    }
+
+    @Test
+    void the_simulated_mode_stores_its_id_but_never_calls_the_gateway_to_change_the_period() {
+        trial();
+        pay(PlanCode.PLUS, BillingPeriod.MONTHLY);
+
+        assertThat(subscriptions.byOrganization.get(organization).gatewaySubscriptionId()).startsWith("sub_sim_");
+        asAdmin(() -> commands.changeBillingPeriod(BillingPeriod.ANNUAL));
+        assertThat(payments.scheduledSubscriptionIds).isEmpty();
     }
 
     @Test
@@ -421,7 +483,7 @@ class SubscriptionCommandServiceTest {
         var started = asAdmin(() -> commands.startCheckout(plan, period));
         String body = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_" + UUID.randomUUID(),
                 "checkout.session.completed", started.session().sessionId(), organization, plan, period,
-                started.payment().idempotencyKey(), chargeId));
+                started.payment().idempotencyKey(), chargeId, null));
         assertThat(commands.receiveWebhook(body, "ok")).isEqualTo(WebhookResult.PROCESSED);
     }
 

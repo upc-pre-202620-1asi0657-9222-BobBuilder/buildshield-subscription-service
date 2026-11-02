@@ -18,27 +18,31 @@ import java.util.UUID;
  * @param paymentKey     clave de idempotencia del cobro (metadatos de la sesión), si viene
  * @param chargeId       identificador del cobro en la pasarela (factura {@code in_...}), si viene
  * @param amount         monto cobrado, solo en {@link Type#RENEWAL_PAID} y si viene
+ * @param gatewaySubscriptionId suscripción en la pasarela ({@code sub_...}), si viene
  */
 public record PaymentEvent(String eventId, String providerType, Type type, String sessionId, UUID organizationId,
-        PlanCode plan, BillingPeriod billingPeriod, UUID paymentKey, String chargeId, BigDecimal amount) {
+        PlanCode plan, BillingPeriod billingPeriod, UUID paymentKey, String chargeId, BigDecimal amount,
+        String gatewaySubscriptionId) {
 
     /** Evento sin efecto sobre la suscripción. */
     public static PaymentEvent ignored(String eventId, String providerType) {
-        return new PaymentEvent(eventId, providerType, Type.IGNORED, null, null, null, null, null, null, null);
+        return new PaymentEvent(eventId, providerType, Type.IGNORED, null, null, null, null, null, null, null,
+                null);
     }
 
     /** Pago de una sesión de Checkout. */
     public static PaymentEvent checkoutCompleted(String eventId, String providerType, String sessionId,
-            UUID organizationId, PlanCode plan, BillingPeriod billingPeriod, UUID paymentKey, String chargeId) {
+            UUID organizationId, PlanCode plan, BillingPeriod billingPeriod, UUID paymentKey, String chargeId,
+            String gatewaySubscriptionId) {
         return new PaymentEvent(eventId, providerType, Type.CHECKOUT_COMPLETED, sessionId, organizationId, plan,
-                billingPeriod, paymentKey, chargeId, null);
+                billingPeriod, paymentKey, chargeId, null, gatewaySubscriptionId);
     }
 
     /** Cobro de la renovación de un periodo. */
     public static PaymentEvent renewalPaid(String eventId, String providerType, UUID organizationId, String chargeId,
-            BigDecimal amount) {
+            BigDecimal amount, String gatewaySubscriptionId) {
         return new PaymentEvent(eventId, providerType, Type.RENEWAL_PAID, null, organizationId, null, null, null,
-                chargeId, amount);
+                chargeId, amount, gatewaySubscriptionId);
     }
 
     /** Lo que significa el evento para la suscripción. */

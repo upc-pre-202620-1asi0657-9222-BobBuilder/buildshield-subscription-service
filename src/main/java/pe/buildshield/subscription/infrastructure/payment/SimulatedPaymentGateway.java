@@ -42,8 +42,8 @@ class SimulatedPaymentGateway implements PaymentGateway {
 
     /** En el modo simulado el cambio solo vive en la suscripción local y se aplica en la renovación automática. */
     @Override
-    public void scheduleBillingPeriodChange(UUID organizationId, Plan plan, BillingPeriod current,
-            BillingPeriod target) {
+    public void scheduleBillingPeriodChange(UUID organizationId, String gatewaySubscriptionId, Plan plan,
+            BillingPeriod current, BillingPeriod target) {
         // Nada que programar fuera de la base local.
     }
 }

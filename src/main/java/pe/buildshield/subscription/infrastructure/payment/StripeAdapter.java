@@ -38,8 +38,9 @@ import java.util.function.Supplier;
  *       planes. La misma clave devuelve la misma sesión con su URL: por eso no se guardan.</li>
  *   <li>Cambio de modalidad (US12): un {@code subscription_schedule} de dos fases, la actual hasta el fin del periodo y
  *       la nueva modalidad desde el siguiente cobro, sin prorrateo. Volver a la modalidad actual libera el schedule.
- *       La suscripción de Stripe se ubica con {@code GET /v1/subscriptions/search} por la organización de sus
- *       metadatos.</li>
+ *       La suscripción de Stripe se lee con {@code GET /v1/subscriptions/{id}} usando el id guardado. Solo si no hay
+ *       id guardado se busca con {@code GET /v1/subscriptions/search} por la organización de sus metadatos: esa
+ *       búsqueda puede demorar hasta un minuto y no está disponible en todas las regiones de Stripe.</li>
  * </ul>
  *
  * Cada llamada tiene tiempo máximo de conexión y de respuesta ({@code STRIPE_TIMEOUT}) y pasa por un circuit breaker
@@ -114,10 +115,11 @@ class StripeAdapter implements PaymentGateway {
     }
 
     @Override
-    public void scheduleBillingPeriodChange(UUID organizationId, Plan plan, BillingPeriod current,
-            BillingPeriod target) {
+    public void scheduleBillingPeriodChange(UUID organizationId, String gatewaySubscriptionId, Plan plan,
+            BillingPeriod current, BillingPeriod target) {
         requireConfigured();
-        JsonNode subscription = findSubscription(organizationId);
+        JsonNode subscription = gatewaySubscriptionId != null ? retrieveSubscription(gatewaySubscriptionId)
+                : findSubscription(organizationId);
         String providerSubscriptionId = subscription.path("id").asText(null);
         if (providerSubscriptionId == null) {
             throw new UnavailableException("Stripe no tiene una suscripción vigente de la organización");
@@ -162,7 +164,19 @@ class StripeAdapter implements PaymentGateway {
         log.info("Stripe: cambio a {} programado para {} desde {}", target, providerSubscriptionId, periodEnd);
     }
 
-    /** La suscripción no cancelada de la organización. La búsqueda de Stripe puede demorar hasta un minuto. */
+    /** La suscripción por su id guardado. Una cancelada no sirve, igual que en {@link #findSubscription}. */
+    private JsonNode retrieveSubscription(String gatewaySubscriptionId) {
+        JsonNode subscription = call(() -> http.get()
+                .uri("/v1/subscriptions/{id}", gatewaySubscriptionId)
+                .retrieve()
+                .body(String.class));
+        if ("canceled".equals(subscription.path("status").asText(null))) {
+            throw new UnavailableException("Stripe no tiene una suscripción vigente de la organización");
+        }
+        return subscription;
+    }
+
+    /** Respaldo sin id guardado: la suscripción no cancelada de la organización, según sus metadatos. */
     private JsonNode findSubscription(UUID organizationId) {
         String query = "metadata['organizationId']:'" + organizationId + "' AND -status:'canceled'";
         return call(() -> http.get()

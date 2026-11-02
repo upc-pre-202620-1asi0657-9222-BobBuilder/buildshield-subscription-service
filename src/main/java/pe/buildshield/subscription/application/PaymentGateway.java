@@ -27,13 +27,14 @@ public interface PaymentGateway {
 
     /**
      * Programa en la pasarela el cambio de modalidad para el siguiente periodo de cobro (US12). Si {@code target} es
-     * la modalidad actual, cancela un cambio programado. La suscripción de la pasarela se ubica por la organización,
-     * que viaja en sus metadatos: aquí no se guarda su identificador.
+     * la modalidad actual, cancela un cambio programado.
      *
+     * @param gatewaySubscriptionId id guardado de la suscripción en la pasarela. Si es nulo (filas anteriores a la
+     *                              columna o webhook sin el id), se ubica por la organización de sus metadatos.
      * @throws UnavailableException si la pasarela no responde, falla o no tiene la suscripción de la organización
      */
-    void scheduleBillingPeriodChange(UUID organizationId, Plan plan, BillingPeriod current,
-            BillingPeriod target);
+    void scheduleBillingPeriodChange(UUID organizationId, String gatewaySubscriptionId, Plan plan,
+            BillingPeriod current, BillingPeriod target);
 
     /**
      * Pedido de una sesión de pago.

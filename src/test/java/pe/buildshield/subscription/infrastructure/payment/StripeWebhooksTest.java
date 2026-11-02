@@ -33,13 +33,13 @@ class StripeWebhooksTest {
         String payload = """
                 {"id":"evt_1","type":"checkout.session.completed","data":{"object":{"id":"cs_1",
                 "payment_status":"paid","client_reference_id":"%s","customer":"cus_1",
-                "invoice":{"id":"in_1","object":"invoice"},
+                "invoice":{"id":"in_1","object":"invoice"},"subscription":"sub_1",
                 "metadata":{"plan":"PLUS","billingPeriod":"ANNUAL","paymentKey":"%s"}}}}""".formatted(organization, key);
 
         PaymentEvent event = webhooks.verify(payload, StripeSignature.header(payload, SECRET, NOW));
 
         assertThat(event).isEqualTo(PaymentEvent.checkoutCompleted("evt_1", "checkout.session.completed", "cs_1",
-                organization, PlanCode.PLUS, BillingPeriod.ANNUAL, key, "in_1"));
+                organization, PlanCode.PLUS, BillingPeriod.ANNUAL, key, "in_1", "sub_1"));
     }
 
     @Test
@@ -75,7 +75,7 @@ class StripeWebhooksTest {
                 "amount_paid":29900,"subscription":"sub_1",
                 "subscription_details":{"metadata":{"organizationId":"%s"}}}}}""".formatted(organization);
         assertThat(verify(renewal)).isEqualTo(PaymentEvent.renewalPaid("evt_5", "invoice.paid", organization, "in_5",
-                new java.math.BigDecimal("299.00")));
+                new java.math.BigDecimal("299.00"), "sub_1"));
 
         String newApi = """
                 {"id":"evt_6","type":"invoice.paid","data":{"object":{"billing_reason":"subscription_cycle",
@@ -83,6 +83,7 @@ class StripeWebhooksTest {
                 "metadata":{"organizationId":"%s"}}}}}}""".formatted(organization);
         assertThat(verify(newApi).organizationId()).isEqualTo(organization);
         assertThat(verify(newApi).amount()).isNull();
+        assertThat(verify(newApi).gatewaySubscriptionId()).isEqualTo("sub_2");
 
         String first = """
                 {"id":"evt_7","type":"invoice.paid","data":{"object":{"billing_reason":"subscription_create",
@@ -92,6 +93,34 @@ class StripeWebhooksTest {
         String other = """
                 {"id":"evt_8","type":"customer.created","data":{"object":{"id":"cus_1"}}}""";
         assertThat(verify(other)).isEqualTo(PaymentEvent.ignored("evt_8", "customer.created"));
+    }
+
+    @Test
+    void the_stripe_subscription_id_may_be_expanded_or_missing() {
+        String expandedSession = """
+                {"id":"evt_s1","type":"checkout.session.completed","data":{"object":{"id":"cs_s1",
+                "payment_status":"paid","client_reference_id":"%s",
+                "subscription":{"id":"sub_exp","object":"subscription"}}}}""".formatted(organization);
+        assertThat(verify(expandedSession).gatewaySubscriptionId()).isEqualTo("sub_exp");
+
+        String sessionWithout = """
+                {"id":"evt_s2","type":"checkout.session.completed","data":{"object":{"id":"cs_s2",
+                "payment_status":"paid","client_reference_id":"%s","subscription":null}}}""".formatted(organization);
+        assertThat(verify(sessionWithout).type()).isEqualTo(PaymentEvent.Type.CHECKOUT_COMPLETED);
+        assertThat(verify(sessionWithout).gatewaySubscriptionId()).isNull();
+
+        String expandedInvoice = """
+                {"id":"evt_s3","type":"invoice.paid","data":{"object":{"id":"in_s3",
+                "billing_reason":"subscription_cycle","parent":{"subscription_details":{
+                "subscription":{"id":"sub_exp_2"},"metadata":{"organizationId":"%s"}}}}}}""".formatted(organization);
+        assertThat(verify(expandedInvoice).gatewaySubscriptionId()).isEqualTo("sub_exp_2");
+
+        String invoiceWithout = """
+                {"id":"evt_s4","type":"invoice.paid","data":{"object":{"id":"in_s4",
+                "billing_reason":"subscription_cycle",
+                "subscription_details":{"metadata":{"organizationId":"%s"}}}}}""".formatted(organization);
+        assertThat(verify(invoiceWithout).type()).isEqualTo(PaymentEvent.Type.RENEWAL_PAID);
+        assertThat(verify(invoiceWithout).gatewaySubscriptionId()).isNull();
     }
 
     @Test
@@ -148,6 +177,7 @@ class StripeWebhooksTest {
         assertThat(event.billingPeriod()).isEqualTo(BillingPeriod.ANNUAL);
         assertThat(event.paymentKey()).isEqualTo(key);
         assertThat(event.chargeId()).isEqualTo("in_sim_" + key.toString().replace("-", ""));
+        assertThat(event.gatewaySubscriptionId()).isEqualTo("sub_sim_" + key.toString().replace("-", ""));
         assertThatThrownBy(() -> webhooks.verify(webhook.payload(), webhook.signatureHeader()))
                 .isInstanceOf(InvalidPaymentWebhookException.class);
     }

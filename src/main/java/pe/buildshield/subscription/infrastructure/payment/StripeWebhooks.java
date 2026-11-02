@@ -24,10 +24,12 @@ import java.util.UUID;
  *   <li>{@code checkout.session.completed} con {@code payment_status = paid} (o
  *       {@code checkout.session.async_payment_succeeded}): pago de la sesión, activa la suscripción. La organización
  *       viaja en {@code client_reference_id}; el plan, la modalidad y la clave del cobro, en los metadatos que puso
- *       este servicio al abrir la sesión (la firma garantiza que no se alteraron).</li>
+ *       este servicio al abrir la sesión (la firma garantiza que no se alteraron). La suscripción de Stripe viene en
+ *       {@code subscription}.</li>
  *   <li>{@code invoice.paid} con {@code billing_reason = subscription_cycle}: cobro de la renovación. La organización
  *       viene en los metadatos de la suscripción, copiados en {@code subscription_details.metadata} o, en versiones
- *       nuevas de la API, en {@code parent.subscription_details.metadata}.</li>
+ *       nuevas de la API, en {@code parent.subscription_details.metadata}. La suscripción de Stripe viene en
+ *       {@code subscription} o, en versiones nuevas, en {@code parent.subscription_details.subscription}.</li>
  *   <li>Cualquier otro: se ignora.</li>
  * </ul>
  */
@@ -81,7 +83,7 @@ class StripeWebhooks implements PaymentWebhooks {
         return PaymentEvent.checkoutCompleted(eventId, type, text(session, "id"), uuid(reference),
                 enumValue(PlanCode.class, text(metadata, "plan")),
                 enumValue(BillingPeriod.class, text(metadata, "billingPeriod")), uuid(text(metadata, "paymentKey")),
-                id(session, "invoice"));
+                id(session, "invoice"), id(session, "subscription"));
     }
 
     private PaymentEvent invoice(String eventId, String type, JsonNode invoice) {
@@ -93,9 +95,14 @@ class StripeWebhooks implements PaymentWebhooks {
         if (organization == null) {
             organization = text(invoice.path("parent").path("subscription_details").path("metadata"), "organizationId");
         }
+        String subscription = id(invoice, "subscription");
+        if (subscription == null) {
+            subscription = id(invoice.path("parent").path("subscription_details"), "subscription");
+        }
         JsonNode amountPaid = invoice.path("amount_paid");
         BigDecimal amount = amountPaid.isIntegralNumber() ? amountPaid.decimalValue().movePointLeft(2) : null;
-        return PaymentEvent.renewalPaid(eventId, type, uuid(organization), text(invoice, "id"), amount);
+        return PaymentEvent.renewalPaid(eventId, type, uuid(organization), text(invoice, "id"), amount,
+                subscription);
     }
 
     private static PaymentEvent ignored(String eventId, String type) {
@@ -111,7 +118,8 @@ class StripeWebhooks implements PaymentWebhooks {
                 .put("mode", "subscription")
                 .put("payment_status", "paid")
                 .put("client_reference_id", organizationId.toString())
-                .put("invoice", "in_sim_" + suffix);
+                .put("invoice", "in_sim_" + suffix)
+                .put("subscription", "sub_sim_" + suffix);
         session.putObject("metadata")
                 .put("organizationId", organizationId.toString())
                 .put("plan", simulated.plan().name())

@@ -38,7 +38,7 @@ class PaymentGatewayConfigurationTest {
 
         PaymentGateway.CheckoutSession session = simulated.startCheckout(new PaymentGateway.CheckoutRequest(key,
                 UUID.randomUUID(), pro, BillingPeriod.MONTHLY));
-        simulated.scheduleBillingPeriodChange(UUID.randomUUID(), pro, BillingPeriod.MONTHLY, BillingPeriod.ANNUAL);
+        simulated.scheduleBillingPeriodChange(UUID.randomUUID(), null, pro, BillingPeriod.MONTHLY, BillingPeriod.ANNUAL);
 
         assertThat(session.sessionId()).isEqualTo("cs_sim_9f1c2d3e4a5b4c6d8e7f9a0b1c2d3e4f_PRO_MONTHLY");
         assertThat(session.redirectUrl()).isEqualTo("http://localhost:4200/suscripcion/pago-simulado"

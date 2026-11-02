@@ -25,16 +25,20 @@ pago del plan con Stripe Checkout (webhook firmado), cambio entre mensual y anua
 - Pagos (Sprint 4): `PaymentGateway` es el puerto de la pasarela y `StripeAdapter` su adaptador con la API HTTP de
   Stripe (Checkout en modo `subscription`, `Idempotency-Key`, tiempo máximo `STRIPE_TIMEOUT` y circuit breaker de
   Resilience4j: 50 % de fallas en 10 llamadas lo abre 30 s). El servicio nunca recibe ni guarda datos de tarjeta:
-  `payments` solo guarda el monto, el estado y el id de la factura de Stripe (`in_...`). El plan, la modalidad y la
-  organización viajan en los metadatos de Stripe (ver `DESVIACIONES.md`).
+  `payments` solo guarda el monto, el estado y el id de la factura de Stripe (`in_...`), y `subscriptions` el id de la
+  suscripción de Stripe (`gateway_subscription_id`, `sub_...`). El plan, la modalidad y la organización viajan en los
+  metadatos de Stripe (ver `DESVIACIONES.md`).
 - El webhook verifica `Stripe-Signature` (HMAC-SHA256 de `t.cuerpo`, tolerancia de 5 minutos), descarta los eventos
   repetidos por su id (`processed_events`, consumidor `StripeWebhooks`) y activa la suscripción con el plan y la
-  modalidad de los metadatos firmados de la sesión. `invoice.paid` de una renovación empieza el siguiente periodo,
-  registra el cobro y aplica el cambio de modalidad programado. Si el cobro de la renovación se demora, la cuenta sigue
+  modalidad de los metadatos firmados de la sesión, y guarda el id de la suscripción de Stripe. `invoice.paid` de una
+  renovación empieza el siguiente periodo, registra el cobro, aplica el cambio de modalidad programado y actualiza ese
+  id. Si el cobro de la renovación se demora, la cuenta sigue
   operativa 3 días antes de vencer. `period_end` es una fecha: el periodo pagado termina a las 00:00 UTC de ese día.
 - Cambio de modalidad (US12): se programa para el siguiente periodo de cobro (en Stripe, con un subscription schedule
-  de dos fases, sin prorrateo, ubicando la suscripción por `metadata['organizationId']`). Pedir la modalidad actual
-  cancela el cambio programado.
+  de dos fases, sin prorrateo). La suscripción se lee con el id guardado (`GET /v1/subscriptions/{id}`). Solo si la
+  fila no tiene id se busca por `metadata['organizationId']` (`GET /v1/subscriptions/search`), porque esa búsqueda puede
+  demorar hasta un minuto y no está en todas las regiones de Stripe. Pedir la modalidad actual cancela el cambio
+  programado.
 - **Modo simulado** (solo el perfil `local`, sin `STRIPE_SECRET_KEY`): la URL de checkout lleva a la página
   `/suscripcion/pago-simulado` de la web y el pago se completa con
   `POST /api/v1/subscriptions/checkout/{sessionId}/simulated-payment`, que arma y firma el mismo evento de Stripe y lo
@@ -91,4 +95,4 @@ mvn -B verify -Dbuildshield.test.external-database=true
 Las `*IT` usan la base temporal `subscription_it` en `127.0.0.1:5433` con el usuario `buildshield_core` y Kafka
 embebido (`@EmbeddedKafka`). Sin la propiedad usan Testcontainers (requiere Docker). Cucumber cubre US08 (prueba
 gratuita y planes públicos), US09 (estado), US07 y US09 del Sprint 4 (pago con webhook firmado, repetido, falso y
-simulado) y US12 (cambio de modalidad). El adaptador de Stripe se prueba contra un Stripe simulado (servidor HTTP). JaCoCo exige 80 % de líneas en `domain` y `application`.
+simulado) y US12 (cambio de modalidad). El adaptador de Stripe y `StripeSubscriptionIdIT` (webhook firmado, `gateway_subscription_id` y US12 por sus dos caminos) se prueban contra un Stripe simulado (servidor HTTP local): **ninguna prueba usa el Stripe real**, así que los campos de los webhooks y la disponibilidad de la búsqueda quedan por confirmar con una cuenta de prueba. JaCoCo exige 80 % de líneas en `domain` y `application`.

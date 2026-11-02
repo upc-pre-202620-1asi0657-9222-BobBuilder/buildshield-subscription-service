@@ -23,13 +23,15 @@ public class SubscriptionQueryService {
 
     private final PlanRepository plans;
     private final SubscriptionRepository subscriptions;
+    private final PaymentGateway gateway;
     private final SubscriptionProperties properties;
     private final Clock clock;
 
-    public SubscriptionQueryService(PlanRepository plans, SubscriptionRepository subscriptions,
+    public SubscriptionQueryService(PlanRepository plans, SubscriptionRepository subscriptions, PaymentGateway gateway,
             SubscriptionProperties properties, Clock clock) {
         this.plans = plans;
         this.subscriptions = subscriptions;
+        this.gateway = gateway;
         this.properties = properties;
         this.clock = clock;
     }
@@ -59,7 +61,7 @@ public class SubscriptionQueryService {
                 subscription.billingPeriod(), subscription.startedAt(), subscription.validUntil(),
                 subscription.daysRemaining(now), readOnly, subscription.currentPeriodStart(),
                 readOnly ? null : subscription.nextBillingAt(), subscription.pendingBillingPeriod(),
-                subscription.pendingChangeAt(), subscription.paymentProvider());
+                subscription.pendingChangeAt(), subscription.paid() ? gateway.provider() : null);
     }
 
     /**

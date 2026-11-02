@@ -27,18 +27,19 @@ public interface PaymentGateway {
 
     /**
      * Programa en la pasarela el cambio de modalidad para el siguiente periodo de cobro (US12). Si {@code target} es
-     * la modalidad actual, cancela un cambio programado.
+     * la modalidad actual, cancela un cambio programado. La suscripción de la pasarela se ubica por la organización,
+     * que viaja en sus metadatos: aquí no se guarda su identificador.
      *
-     * @param providerSubscriptionId la suscripción en la pasarela ({@code sub_...})
-     * @throws UnavailableException si la pasarela no responde o falla
+     * @throws UnavailableException si la pasarela no responde, falla o no tiene la suscripción de la organización
      */
-    void scheduleBillingPeriodChange(String providerSubscriptionId, Plan plan, BillingPeriod current,
+    void scheduleBillingPeriodChange(UUID organizationId, Plan plan, BillingPeriod current,
             BillingPeriod target);
 
     /**
      * Pedido de una sesión de pago.
      *
-     * @param idempotencyKey clave de idempotencia de la llamada a la pasarela (se guarda con la sesión)
+     * @param idempotencyKey clave de idempotencia de la llamada a la pasarela; se guarda con el cobro y vuelve en los
+     *                       metadatos de la sesión. Repetirla devuelve la misma sesión con su URL.
      * @param organizationId organización que paga; viaja como referencia del cliente y en los metadatos
      */
     record CheckoutRequest(UUID idempotencyKey, UUID organizationId, Plan plan, BillingPeriod period) {

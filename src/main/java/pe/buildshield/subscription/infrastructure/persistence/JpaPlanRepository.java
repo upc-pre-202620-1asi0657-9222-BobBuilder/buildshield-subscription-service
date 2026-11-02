@@ -5,6 +5,7 @@ import pe.buildshield.subscription.domain.model.Plan;
 import pe.buildshield.subscription.domain.model.PlanCode;
 import pe.buildshield.subscription.domain.model.PlanRepository;
 
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 
@@ -19,11 +20,11 @@ class JpaPlanRepository implements PlanRepository {
 
     @Override
     public List<Plan> findAll() {
-        return jpa.findAllByOrderBySortOrder().stream().map(PlanJpaEntity::toDomain).toList();
+        return jpa.findAll().stream().map(PlanJpaEntity::toDomain).sorted(Comparator.comparing(Plan::code)).toList();
     }
 
     @Override
     public Optional<Plan> findByCode(PlanCode code) {
-        return jpa.findById(code.name()).map(PlanJpaEntity::toDomain);
+        return jpa.findByCode(code.name()).map(PlanJpaEntity::toDomain);
     }
 }

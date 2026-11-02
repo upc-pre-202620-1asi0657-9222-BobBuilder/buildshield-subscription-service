@@ -11,5 +11,5 @@ public interface ProcessedPaymentEvents {
      *
      * @return {@code false} si ya estaba registrado (duplicado)
      */
-    boolean markProcessed(String eventId, String eventType);
+    boolean markProcessed(String eventId);
 }

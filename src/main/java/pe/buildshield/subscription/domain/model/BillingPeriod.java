@@ -24,4 +24,9 @@ public enum BillingPeriod {
     public Instant periodEnd(Instant start) {
         return start.atZone(ZoneOffset.UTC).plusMonths(months).toInstant();
     }
+
+    /** Inicio del periodo de cobro que termina en {@code end}. */
+    public Instant periodStart(Instant end) {
+        return end.atZone(ZoneOffset.UTC).minusMonths(months).toInstant();
+    }
 }

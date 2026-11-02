@@ -9,8 +9,7 @@ import java.util.List;
 public final class TestDatabase {
 
     /** Tablas del servicio con datos de prueba, sin el historial de Flyway ni el catálogo de planes. */
-    public static final List<String> TABLES = List.of("subscriptions", "payment_checkouts", "payment_webhook_events",
-            "outbox_events", "processed_events");
+    public static final List<String> TABLES = List.of("subscriptions", "payments", "outbox_events", "processed_events");
 
     private TestDatabase() {
     }

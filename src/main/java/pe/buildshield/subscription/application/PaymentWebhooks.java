@@ -1,8 +1,7 @@
 package pe.buildshield.subscription.application;
 
-import pe.buildshield.subscription.domain.model.PaymentCheckout;
-
 import java.time.Instant;
+import java.util.UUID;
 
 /**
  * Puerto de las notificaciones (webhooks) de la pasarela. La autenticidad la da la firma: el adaptador de Stripe
@@ -21,7 +20,7 @@ public interface PaymentWebhooks {
      * Modo simulado: arma y firma, con el mismo secreto del webhook, el evento {@code checkout.session.completed} que
      * enviaría Stripe al pagarse la sesión. Así el pago simulado recorre el mismo camino que el real.
      */
-    SignedWebhook simulateCheckoutCompleted(PaymentCheckout checkout, Instant paidAt);
+    SignedWebhook simulateCheckoutCompleted(SimulatedSession session, UUID organizationId, Instant paidAt);
 
     /** Cuerpo del webhook y su cabecera {@code Stripe-Signature}. */
     record SignedWebhook(String payload, String signatureHeader) {

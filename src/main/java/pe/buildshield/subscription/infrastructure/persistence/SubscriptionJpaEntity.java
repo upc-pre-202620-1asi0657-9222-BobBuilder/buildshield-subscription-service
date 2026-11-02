@@ -4,83 +4,81 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
 import pe.buildshield.subscription.domain.model.BillingPeriod;
-import pe.buildshield.subscription.domain.model.PaymentProvider;
 import pe.buildshield.subscription.domain.model.PlanCode;
 import pe.buildshield.subscription.domain.model.Subscription;
 import pe.buildshield.subscription.domain.model.SubscriptionStatus;
 import pe.buildshield.subscription.shared.persistence.AuditableAbstractAggregateRoot;
 
 import java.time.Instant;
+import java.time.LocalDate;
 
 @Entity
 @Table(name = "subscriptions")
 public class SubscriptionJpaEntity extends AuditableAbstractAggregateRoot<SubscriptionJpaEntity> {
 
-    @Enumerated(EnumType.STRING)
-    @Column(name = "plan_code", nullable = false, length = 10)
-    private PlanCode planCode;
+    /** Modalidad con la que se guarda la prueba gratuita: la columna es NOT NULL y la prueba no tiene modalidad. */
+    private static final BillingPeriod TRIAL_BILLING_PERIOD = BillingPeriod.MONTHLY;
+
+    @ManyToOne(optional = false)
+    @JoinColumn(name = "plan_id", nullable = false)
+    private PlanJpaEntity plan;
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "billing_period", length = 10)
+    @Column(name = "billing_period", nullable = false, length = 10)
     private BillingPeriod billingPeriod;
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "status", nullable = false, length = 10)
+    @Column(name = "status", nullable = false, length = 15)
     private SubscriptionStatus status;
 
-    @Column(name = "started_at", nullable = false, updatable = false)
-    private Instant startedAt;
+    @Column(name = "trial_ends_at")
+    private Instant trialEndsAt;
 
-    @Column(name = "valid_until", nullable = false)
-    private Instant validUntil;
+    @Column(name = "period_end")
+    private LocalDate periodEnd;
 
-    @Column(name = "expired_at")
-    private Instant expiredAt;
-
-    @Column(name = "current_period_start", nullable = false)
-    private Instant currentPeriodStart;
-
+    /** Fuera del ER, documentado en DESVIACIONES.md: modalidad que rige desde el siguiente periodo de cobro. */
     @Enumerated(EnumType.STRING)
     @Column(name = "pending_billing_period", length = 10)
     private BillingPeriod pendingBillingPeriod;
 
-    @Enumerated(EnumType.STRING)
-    @Column(name = "payment_provider", length = 10)
-    private PaymentProvider paymentProvider;
-
-    @Column(name = "payment_customer_id", length = 100)
-    private String paymentCustomerId;
-
-    @Column(name = "payment_subscription_id", length = 100)
-    private String paymentSubscriptionId;
+    @Transient
+    private Instant startedAt;
 
     protected SubscriptionJpaEntity() {
     }
 
-    SubscriptionJpaEntity(Subscription subscription) {
+    SubscriptionJpaEntity(Subscription subscription, PlanJpaEntity plan) {
         startedAt = subscription.startedAt();
-        apply(subscription);
+        apply(subscription, plan);
     }
 
-    void apply(Subscription subscription) {
-        planCode = subscription.plan();
-        billingPeriod = subscription.billingPeriod();
+    /** {@code created_at} es el alta de la suscripción: la prueba cuenta desde el registro de la organización. */
+    @PrePersist
+    void keepStartDate() {
+        if (startedAt != null) {
+            overrideCreatedAt(startedAt);
+        }
+    }
+
+    void apply(Subscription subscription, PlanJpaEntity currentPlan) {
+        plan = currentPlan;
+        billingPeriod = subscription.billingPeriod() == null ? TRIAL_BILLING_PERIOD : subscription.billingPeriod();
         status = subscription.status();
-        validUntil = subscription.validUntil();
-        expiredAt = subscription.expiredAt();
-        Subscription.Payment payment = subscription.payment();
-        currentPeriodStart = payment.currentPeriodStart();
-        pendingBillingPeriod = payment.pendingBillingPeriod();
-        paymentProvider = payment.provider();
-        paymentCustomerId = payment.customerId();
-        paymentSubscriptionId = payment.providerSubscriptionId();
+        trialEndsAt = subscription.trialEndsAt();
+        periodEnd = subscription.periodEnd();
+        pendingBillingPeriod = subscription.pendingBillingPeriod();
     }
 
     Subscription toDomain() {
-        return Subscription.restore(getId(), getOrganizationId(), planCode, billingPeriod, status, startedAt,
-                validUntil, expiredAt, new Subscription.Payment(currentPeriodStart, pendingBillingPeriod,
-                        paymentProvider, paymentCustomerId, paymentSubscriptionId), getVersion());
+        PlanCode code = plan.toDomain().code();
+        return Subscription.restore(getId(), getOrganizationId(), code, code == PlanCode.FREE ? null : billingPeriod,
+                status, getCreatedAt(), trialEndsAt, periodEnd, pendingBillingPeriod, getVersion());
     }
 }

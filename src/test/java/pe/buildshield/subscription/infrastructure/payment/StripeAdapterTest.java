@@ -36,15 +36,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class StripeAdapterTest {
 
-    private static final Plan PLUS = new Plan(PlanCode.PLUS, "Plus", "Hasta 5 obras", 5, false,
-            new BigDecimal("299.00"), new BigDecimal("2990.00"), "PEN");
+    private static final Plan PLUS = new Plan(PlanCode.PLUS, 5, new BigDecimal("299.00"), new BigDecimal("16.67"));
+    private static final UUID ORGANIZATION = UUID.fromString("9f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f");
+    private static final String SEARCH = "GET /v1/subscriptions/search";
 
     private HttpServer stripe;
     private final List<Recorded> requests = new ArrayList<>();
     private final Map<String, Response> responses = new ConcurrentHashMap<>();
     private final ObjectMapper json = new ObjectMapper();
 
-    record Recorded(String method, String path, Map<String, String> form, String authorization, String idempotencyKey) {
+    record Recorded(String method, String path, String query, Map<String, String> form, String authorization,
+            String idempotencyKey) {
     }
 
     record Response(int status, String body, long delayMillis) {
@@ -57,7 +59,8 @@ class StripeAdapterTest {
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             String key = exchange.getRequestMethod() + " " + exchange.getRequestURI().getPath();
             synchronized (requests) {
-                requests.add(new Recorded(exchange.getRequestMethod(), exchange.getRequestURI().getPath(), form(body),
+                requests.add(new Recorded(exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
+                        exchange.getRequestURI().getQuery(), form(body),
                         exchange.getRequestHeaders().getFirst("Authorization"),
                         exchange.getRequestHeaders().getFirst("Idempotency-Key")));
             }
@@ -105,6 +108,8 @@ class StripeAdapterTest {
         assertThat(request.authorization()).isEqualTo("Bearer sk_test_fake");
         assertThat(request.idempotencyKey()).isEqualTo("checkout-" + key);
         assertThat(request.form()).containsEntry("mode", "subscription")
+                .containsEntry("metadata[paymentKey]", key.toString())
+                .containsEntry("subscription_data[metadata][organizationId]", organization.toString())
                 .containsEntry("client_reference_id", organization.toString())
                 .containsEntry("metadata[plan]", "PLUS")
                 .containsEntry("metadata[billingPeriod]", "ANNUAL")
@@ -130,17 +135,19 @@ class StripeAdapterTest {
 
     @Test
     void the_billing_period_change_is_a_two_phase_schedule_from_the_next_billing_date() {
-        responses.put("GET /v1/subscriptions/sub_1", new Response(200, """
-                {"id":"sub_1","schedule":null,"items":{"data":[{"price":{"id":"price_m","product":"prod_1"},
-                "current_period_start":1760200000,"current_period_end":1762878400}]}}""", 0));
+        responses.put(SEARCH, new Response(200, """
+                {"data":[{"id":"sub_1","schedule":null,"items":{"data":[{"price":{"id":"price_m","product":"prod_1"},
+                "current_period_start":1760200000,"current_period_end":1762878400}]}}]}""", 0));
         responses.put("POST /v1/subscription_schedules", new Response(200, "{\"id\":\"sub_sched_1\"}", 0));
         responses.put("POST /v1/subscription_schedules/sub_sched_1", new Response(200, "{\"id\":\"sub_sched_1\"}", 0));
 
-        adapter(null, Duration.ofSeconds(2)).scheduleBillingPeriodChange("sub_1", PLUS, BillingPeriod.MONTHLY,
+        adapter(null, Duration.ofSeconds(2)).scheduleBillingPeriodChange(ORGANIZATION, PLUS, BillingPeriod.MONTHLY,
                 BillingPeriod.ANNUAL);
 
-        assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/sub_1",
+        assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/search",
                 "/v1/subscription_schedules", "/v1/subscription_schedules/sub_sched_1");
+        assertThat(requests.get(0).query())
+                .isEqualTo("query=metadata['organizationId']:'" + ORGANIZATION + "' AND -status:'canceled'");
         assertThat(requests.get(1).form()).containsEntry("from_subscription", "sub_1");
         assertThat(requests.get(2).form()).containsEntry("phases[0][items][0][price]", "price_m")
                 .containsEntry("phases[0][start_date]", "1760200000")
@@ -155,21 +162,20 @@ class StripeAdapterTest {
 
     @Test
     void an_existing_schedule_is_reused_and_returning_to_the_current_period_releases_it() {
-        responses.put("GET /v1/subscriptions/sub_2", new Response(200, """
-                {"id":"sub_2","schedule":"sub_sched_2","current_period_start":10,"current_period_end":20,
-                "items":{"data":[{"price":{"id":"price_y","product":"prod_1"}}]}}""", 0));
+        responses.put(SEARCH, new Response(200, """
+                {"data":[{"id":"sub_2","schedule":"sub_sched_2","current_period_start":10,"current_period_end":20,
+                "items":{"data":[{"price":{"id":"price_y","product":"prod_1"}}]}}]}""", 0));
         responses.put("POST /v1/subscription_schedules/sub_sched_2", new Response(200, "{}", 0));
         responses.put("POST /v1/subscription_schedules/sub_sched_2/release", new Response(200, "{}", 0));
         StripeAdapter adapter = adapter(new PaymentsProperties.Prices(null, null, "price_pro_m", null),
                 Duration.ofSeconds(2));
-        Plan pro = new Plan(PlanCode.PRO, "Pro", "Ilimitadas", null, false, new BigDecimal("699"),
-                new BigDecimal("6990"), "PEN");
+        Plan pro = new Plan(PlanCode.PRO, null, new BigDecimal("699"), new BigDecimal("16.67"));
 
-        adapter.scheduleBillingPeriodChange("sub_2", pro, BillingPeriod.ANNUAL, BillingPeriod.MONTHLY);
-        adapter.scheduleBillingPeriodChange("sub_2", pro, BillingPeriod.ANNUAL, BillingPeriod.ANNUAL);
+        adapter.scheduleBillingPeriodChange(ORGANIZATION, pro, BillingPeriod.ANNUAL, BillingPeriod.MONTHLY);
+        adapter.scheduleBillingPeriodChange(ORGANIZATION, pro, BillingPeriod.ANNUAL, BillingPeriod.ANNUAL);
 
-        assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/sub_2",
-                "/v1/subscription_schedules/sub_sched_2", "/v1/subscriptions/sub_2",
+        assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/search",
+                "/v1/subscription_schedules/sub_sched_2", "/v1/subscriptions/search",
                 "/v1/subscription_schedules/sub_sched_2/release");
         assertThat(requests.get(1).form()).containsEntry("phases[1][items][0][price]", "price_pro_m")
                 .containsEntry("phases[0][end_date]", "20");
@@ -177,9 +183,9 @@ class StripeAdapterTest {
 
     @Test
     void returning_to_the_current_period_without_schedule_does_nothing_else() {
-        responses.put("GET /v1/subscriptions/sub_3", new Response(200, "{\"id\":\"sub_3\",\"schedule\":null}", 0));
+        responses.put(SEARCH, new Response(200, "{\"data\":[{\"id\":\"sub_3\",\"schedule\":null}]}", 0));
 
-        adapter(null, Duration.ofSeconds(2)).scheduleBillingPeriodChange("sub_3", PLUS, BillingPeriod.MONTHLY,
+        adapter(null, Duration.ofSeconds(2)).scheduleBillingPeriodChange(ORGANIZATION, PLUS, BillingPeriod.MONTHLY,
                 BillingPeriod.MONTHLY);
 
         assertThat(requests).hasSize(1);
@@ -188,20 +194,21 @@ class StripeAdapterTest {
     @Test
     void incomplete_stripe_answers_are_reported_as_unavailable() {
         responses.put("POST /v1/checkout/sessions", new Response(200, "{\"id\":\"cs_x\"}", 0));
-        responses.put("GET /v1/subscriptions/sub_4", new Response(200, "{\"id\":\"sub_4\",\"items\":{\"data\":[]}}", 0));
-        responses.put("GET /v1/subscriptions/sub_5", new Response(200, """
-                {"id":"sub_5","items":{"data":[{"price":{"id":"price_m"},"current_period_end":99}]}}""", 0));
         responses.put("POST /v1/subscription_schedules", new Response(200, "{}", 0));
         StripeAdapter adapter = adapter(null, Duration.ofSeconds(2));
 
         assertThatThrownBy(() -> adapter.startCheckout(new PaymentGateway.CheckoutRequest(UUID.randomUUID(),
                 UUID.randomUUID(), PLUS, BillingPeriod.MONTHLY))).hasMessageContaining("no devolvió la sesión");
-        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange("sub_4", PLUS, BillingPeriod.MONTHLY,
+        responses.put(SEARCH, new Response(200, "{\"data\":[{\"id\":\"sub_4\",\"items\":{\"data\":[]}}]}", 0));
+        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, PLUS, BillingPeriod.MONTHLY,
                 BillingPeriod.ANNUAL)).hasMessageContaining("periodo actual");
-        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange("sub_5", PLUS, BillingPeriod.MONTHLY,
+        responses.put(SEARCH, new Response(200, """
+                {"data":[{"id":"sub_5","items":{"data":[{"price":{"id":"price_m"},"current_period_end":99}]}}]}""", 0));
+        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, PLUS, BillingPeriod.MONTHLY,
                 BillingPeriod.ANNUAL)).hasMessageContaining("no devolvió el schedule");
-        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(null, PLUS, BillingPeriod.MONTHLY,
-                BillingPeriod.ANNUAL)).hasMessageContaining("identificador de Stripe");
+        responses.put(SEARCH, new Response(200, "{\"data\":[]}", 0));
+        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, PLUS, BillingPeriod.MONTHLY,
+                BillingPeriod.ANNUAL)).hasMessageContaining("suscripción vigente");
     }
 
     @Test
@@ -245,7 +252,7 @@ class StripeAdapterTest {
 
         assertThat(adapter.provider()).isEqualTo(PaymentProvider.STRIPE);
         assertThatThrownBy(() -> adapter.startCheckout(request())).hasMessageContaining("STRIPE_SECRET_KEY");
-        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange("sub_1", PLUS, BillingPeriod.MONTHLY,
+        assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, PLUS, BillingPeriod.MONTHLY,
                 BillingPeriod.ANNUAL)).hasMessageContaining("STRIPE_SECRET_KEY");
         assertThat(requests).isEmpty();
         assertThat(StripeAdapter.cents(new BigDecimal("249.165"))).isEqualTo("24917");

@@ -8,6 +8,7 @@ import io.cucumber.java.es.Entonces;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.kafka.core.KafkaTemplate;
+import pe.buildshield.subscription.application.SimulatedSession;
 import pe.buildshield.subscription.application.SubscriptionCommandService;
 import pe.buildshield.subscription.infrastructure.messaging.SubscriptionOutboxPublisher;
 import pe.buildshield.subscription.shared.messaging.Topics;
@@ -147,7 +148,7 @@ public class SubscriptionSteps {
         publisher.publishPending();
         assertThat(jdbc.queryForObject("""
                 SELECT count(*) FROM outbox_events WHERE organization_id = ? AND event_type = ?
-                  AND payload ->> 'status' = ? AND published_at IS NOT NULL""", Long.class, organizationId, eventType,
+                  AND payload -> 'payload' ->> 'status' = ? AND published_at IS NOT NULL""", Long.class, organizationId, eventType,
                 status)).isEqualTo(1);
     }
 
@@ -243,12 +244,15 @@ public class SubscriptionSteps {
 
     @Cuando("la pasarela confirma el pago de la sesión con un webhook firmado")
     public void signedWebhook() throws Exception {
+        SimulatedSession checkout = SimulatedSession.parse(checkoutSessionId).orElseThrow();
         lastWebhook = """
                 {"id":"evt_%s","object":"event","type":"checkout.session.completed","data":{"object":{
                 "id":"%s","object":"checkout.session","mode":"subscription","payment_status":"paid",
-                "client_reference_id":"%s","customer":"cus_test_1","subscription":"sub_test_%s"}}}"""
+                "client_reference_id":"%s","invoice":"in_test_%s","metadata":{"plan":"%s","billingPeriod":"%s",
+                "paymentKey":"%s"}}}}"""
                 .formatted(UUID.randomUUID().toString().replace("-", ""), checkoutSessionId, organizationId,
-                        UUID.randomUUID().toString().replace("-", ""));
+                        UUID.randomUUID().toString().replace("-", ""), checkout.plan(), checkout.period(),
+                        checkout.paymentKey());
         sendWebhook(lastWebhook, WEBHOOK_SECRET);
     }
 
@@ -277,7 +281,7 @@ public class SubscriptionSteps {
     public void activatedOnce() {
         assertThat(jdbc.queryForObject("""
                 SELECT count(*) FROM outbox_events WHERE organization_id = ? AND event_type = 'SubscriptionActivated'
-                  AND payload ->> 'reason' = 'PAYMENT_CONFIRMED'""", Long.class, organizationId)).isEqualTo(1);
+                  AND payload -> 'payload' ->> 'reason' = 'PAYMENT_CONFIRMED'""", Long.class, organizationId)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT status FROM subscriptions WHERE organization_id = ?", String.class,
                 organizationId)).isEqualTo("ACTIVE");
     }
@@ -307,10 +311,12 @@ public class SubscriptionSteps {
         assertThat(body.path("statusLabel").asText()).isEqualTo("Activa");
         assertThat(body.path("planName").asText()).isEqualTo(plan);
         assertThat(body.path("readOnly").asBoolean()).isFalse();
-        Instant expected = clock.instant().atZone(ZoneOffset.UTC).plusMonths(months).toInstant();
-        assertThat(Instant.parse(body.path("validUntil").asText())).isCloseTo(expected, within(Duration.ofSeconds(1)));
+        // period_end es una fecha: el periodo pagado termina a las 00:00 UTC de ese día.
+        Instant today = clock.instant().atZone(ZoneOffset.UTC).toLocalDate().atStartOfDay(ZoneOffset.UTC).toInstant();
+        Instant expected = today.atZone(ZoneOffset.UTC).plusMonths(months).toInstant();
+        assertThat(Instant.parse(body.path("validUntil").asText())).isEqualTo(expected);
         assertThat(Instant.parse(body.path("currentPeriodStart").asText()))
-                .isCloseTo(clock.instant(), within(Duration.ofSeconds(1)));
+                .isCloseTo(today, within(Duration.ofDays(3)));
     }
 
     @Entonces("la modalidad es {string} con la próxima fecha de cobro al fin del periodo")

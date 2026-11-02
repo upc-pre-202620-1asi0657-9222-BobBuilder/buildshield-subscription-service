@@ -34,15 +34,15 @@ class PaymentGatewayConfigurationTest {
     void the_simulated_checkout_points_to_the_web_page_with_the_session() {
         PaymentGateway simulated = configuration.paymentGateway(properties(true, null, null), json);
         UUID key = UUID.fromString("9f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f");
-        Plan pro = new Plan(PlanCode.PRO, "Pro", "Ilimitadas", null, false, BigDecimal.ONE, BigDecimal.TEN, "PEN");
+        Plan pro = new Plan(PlanCode.PRO, null, BigDecimal.ONE, BigDecimal.TEN);
 
         PaymentGateway.CheckoutSession session = simulated.startCheckout(new PaymentGateway.CheckoutRequest(key,
                 UUID.randomUUID(), pro, BillingPeriod.MONTHLY));
-        simulated.scheduleBillingPeriodChange("sub_sim", pro, BillingPeriod.MONTHLY, BillingPeriod.ANNUAL);
+        simulated.scheduleBillingPeriodChange(UUID.randomUUID(), pro, BillingPeriod.MONTHLY, BillingPeriod.ANNUAL);
 
-        assertThat(session.sessionId()).isEqualTo("cs_sim_9f1c2d3e4a5b4c6d8e7f9a0b1c2d3e4f");
+        assertThat(session.sessionId()).isEqualTo("cs_sim_9f1c2d3e4a5b4c6d8e7f9a0b1c2d3e4f_PRO_MONTHLY");
         assertThat(session.redirectUrl()).isEqualTo("http://localhost:4200/suscripcion/pago-simulado"
-                + "?session_id=cs_sim_9f1c2d3e4a5b4c6d8e7f9a0b1c2d3e4f&plan=PRO&billingPeriod=MONTHLY");
+                + "?session_id=cs_sim_9f1c2d3e4a5b4c6d8e7f9a0b1c2d3e4f_PRO_MONTHLY&plan=PRO&billingPeriod=MONTHLY");
     }
 
     @Test

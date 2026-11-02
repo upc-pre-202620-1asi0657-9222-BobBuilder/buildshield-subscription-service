@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -23,9 +24,12 @@ class SubscriptionTest {
         assertThat(trial.plan()).isEqualTo(PlanCode.FREE);
         assertThat(trial.status()).isEqualTo(SubscriptionStatus.TRIAL);
         assertThat(trial.billingPeriod()).isNull();
+        assertThat(trial.paid()).isFalse();
         assertThat(trial.startedAt()).isEqualTo(START);
+        assertThat(trial.trialEndsAt()).isEqualTo(START.plus(Duration.ofDays(14)));
+        assertThat(trial.periodEnd()).isNull();
         assertThat(trial.validUntil()).isEqualTo(START.plus(Duration.ofDays(14)));
-        assertThat(trial.expiredAt()).isNull();
+        assertThat(trial.currentPeriodStart()).isEqualTo(START);
         assertThat(trial.version()).isNull();
         assertThat(trial.readOnly(START)).isFalse();
         assertThat(trial.daysRemaining(START)).isEqualTo(14);
@@ -56,7 +60,6 @@ class SubscriptionTest {
         assertThat(trial.daysRemaining(end)).isZero();
         assertThat(trial.expireIfDue(end)).isTrue();
         assertThat(trial.status()).isEqualTo(SubscriptionStatus.EXPIRED);
-        assertThat(trial.expiredAt()).isEqualTo(end);
         assertThat(trial.expireIfDue(end.plusSeconds(60))).isFalse();
         assertThat(trial.isDue(end.plusSeconds(60))).isFalse();
     }
@@ -64,25 +67,28 @@ class SubscriptionTest {
     @Test
     void restore_keeps_every_field() {
         UUID id = UUID.randomUUID();
-        Instant until = START.plus(Duration.ofDays(30));
+        LocalDate end = LocalDate.parse("2026-11-07");
         Subscription restored = Subscription.restore(id, ORGANIZATION, PlanCode.PLUS, BillingPeriod.ANNUAL,
-                SubscriptionStatus.ACTIVE, START, until, null, 3L);
+                SubscriptionStatus.ACTIVE, START, null, end, null, 3L);
 
         assertThat(restored.id()).isEqualTo(id);
         assertThat(restored.plan()).isEqualTo(PlanCode.PLUS);
         assertThat(restored.billingPeriod()).isEqualTo(BillingPeriod.ANNUAL);
         assertThat(restored.status()).isEqualTo(SubscriptionStatus.ACTIVE);
+        assertThat(restored.periodEnd()).isEqualTo(end);
         assertThat(restored.version()).isEqualTo(3L);
         assertThat(SubscriptionStatus.ACTIVE.label()).isEqualTo("Activa");
         assertThat(SubscriptionStatus.EXPIRED.label()).isEqualTo("Vencida");
         assertThatThrownBy(() -> Subscription.restore(null, ORGANIZATION, PlanCode.PLUS, null,
-                SubscriptionStatus.ACTIVE, START, until, null, 0L)).isInstanceOf(NullPointerException.class);
+                SubscriptionStatus.ACTIVE, START, null, end, null, 0L)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> Subscription.restore(id, ORGANIZATION, PlanCode.PLUS, null,
+                SubscriptionStatus.ACTIVE, START, null, null, null, 0L)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void an_expired_subscription_is_read_only_even_before_its_end_date() {
         Subscription expired = Subscription.restore(UUID.randomUUID(), ORGANIZATION, PlanCode.PRO,
-                BillingPeriod.MONTHLY, SubscriptionStatus.EXPIRED, START, START.plus(Duration.ofDays(30)), START, 1L);
+                BillingPeriod.MONTHLY, SubscriptionStatus.EXPIRED, START, null, LocalDate.parse("2026-11-07"), null, 1L);
 
         assertThat(expired.readOnly(START.plusSeconds(10))).isTrue();
         assertThat(expired.daysRemaining(START.plusSeconds(10))).isZero();
@@ -94,19 +100,17 @@ class SubscriptionTest {
         Instant paidAt = START.plus(Duration.ofDays(20));
         subscription.expireIfDue(paidAt);
 
-        subscription.activate(PlanCode.PLUS, BillingPeriod.MONTHLY, paidAt, PaymentProvider.STRIPE, "cus_1", "sub_1");
+        subscription.activate(PlanCode.PLUS, BillingPeriod.MONTHLY, paidAt);
 
         assertThat(subscription.status()).isEqualTo(SubscriptionStatus.ACTIVE);
         assertThat(subscription.plan()).isEqualTo(PlanCode.PLUS);
+        assertThat(subscription.paid()).isTrue();
         assertThat(subscription.billingPeriod()).isEqualTo(BillingPeriod.MONTHLY);
-        assertThat(subscription.currentPeriodStart()).isEqualTo(paidAt);
-        assertThat(subscription.validUntil()).isEqualTo(Instant.parse("2026-11-28T15:00:00Z"));
+        assertThat(subscription.periodEnd()).isEqualTo(LocalDate.parse("2026-11-28"));
+        assertThat(subscription.currentPeriodStart()).isEqualTo(Instant.parse("2026-10-28T00:00:00Z"));
+        assertThat(subscription.validUntil()).isEqualTo(Instant.parse("2026-11-28T00:00:00Z"));
         assertThat(subscription.nextBillingAt()).isEqualTo(subscription.validUntil());
-        assertThat(subscription.expiredAt()).isNull();
         assertThat(subscription.readOnly(paidAt)).isFalse();
-        assertThat(subscription.paymentProvider()).isEqualTo(PaymentProvider.STRIPE);
-        assertThat(subscription.paymentCustomerId()).isEqualTo("cus_1");
-        assertThat(subscription.paymentSubscriptionId()).isEqualTo("sub_1");
         assertThat(subscription.startedAt()).isEqualTo(START);
     }
 
@@ -114,27 +118,25 @@ class SubscriptionTest {
     void only_plus_or_pro_with_a_billing_period_can_be_activated() {
         Subscription subscription = Subscription.startTrial(ORGANIZATION, START, Duration.ofDays(14));
 
-        assertThatThrownBy(() -> subscription.activate(PlanCode.FREE, BillingPeriod.MONTHLY, START,
-                PaymentProvider.STRIPE, null, null)).hasFieldOrPropertyWithValue("code", "INVALID_PAID_PLAN");
-        assertThatThrownBy(() -> subscription.activate(PlanCode.PRO, null, START, PaymentProvider.STRIPE, null, null))
+        assertThatThrownBy(() -> subscription.activate(PlanCode.FREE, BillingPeriod.MONTHLY, START))
                 .hasFieldOrPropertyWithValue("code", "INVALID_PAID_PLAN");
-        assertThatThrownBy(() -> subscription.activate(null, BillingPeriod.ANNUAL, START, PaymentProvider.STRIPE, null,
-                null)).hasFieldOrPropertyWithValue("code", "INVALID_PAID_PLAN");
-        assertThatThrownBy(() -> subscription.activate(PlanCode.PRO, BillingPeriod.ANNUAL, START, null, null, null))
+        assertThatThrownBy(() -> subscription.activate(PlanCode.PRO, null, START))
+                .hasFieldOrPropertyWithValue("code", "INVALID_PAID_PLAN");
+        assertThatThrownBy(() -> subscription.activate(null, BillingPeriod.ANNUAL, START))
                 .hasFieldOrPropertyWithValue("code", "INVALID_PAID_PLAN");
         assertThat(subscription.nextBillingAt()).isNull();
         assertThat(subscription.pendingChangeAt()).isNull();
     }
 
     @Test
-    void stripe_subscriptions_keep_access_during_the_payment_grace_period() {
-        Subscription subscription = paid(PaymentProvider.STRIPE, BillingPeriod.MONTHLY);
+    void paid_subscriptions_keep_access_during_the_payment_grace_period() {
+        Subscription subscription = paid(BillingPeriod.MONTHLY);
         Instant end = subscription.validUntil();
 
         assertThat(subscription.accessUntil()).isEqualTo(end.plus(Subscription.PAYMENT_GRACE));
         assertThat(subscription.readOnly(end.plusSeconds(60))).isFalse();
         assertThat(subscription.expireIfDue(end.plusSeconds(60))).isFalse();
-        assertThat(subscription.renewsAutomatically(end.plusSeconds(60))).isFalse();
+        assertThat(subscription.renewsAutomatically(PaymentProvider.STRIPE, end.plusSeconds(60))).isFalse();
         assertThat(subscription.daysRemaining(end.plusSeconds(60))).isZero();
         assertThat(subscription.expireIfDue(end.plus(Subscription.PAYMENT_GRACE))).isTrue();
         assertThat(subscription.readOnly(end.plus(Subscription.PAYMENT_GRACE))).isTrue();
@@ -143,7 +145,7 @@ class SubscriptionTest {
 
     @Test
     void a_renewal_starts_the_next_period_and_applies_the_scheduled_billing_period() {
-        Subscription subscription = paid(PaymentProvider.STRIPE, BillingPeriod.MONTHLY);
+        Subscription subscription = paid(BillingPeriod.MONTHLY);
         Instant end = subscription.validUntil();
 
         assertThat(subscription.scheduleBillingPeriodChange(BillingPeriod.ANNUAL, START))
@@ -163,7 +165,7 @@ class SubscriptionTest {
 
     @Test
     void a_late_renewal_of_an_expired_subscription_starts_when_it_is_paid() {
-        Subscription subscription = paid(PaymentProvider.STRIPE, BillingPeriod.MONTHLY);
+        Subscription subscription = paid(BillingPeriod.MONTHLY);
         Instant late = subscription.validUntil().plus(Duration.ofDays(10));
         subscription.expireIfDue(late);
 
@@ -171,7 +173,6 @@ class SubscriptionTest {
 
         assertThat(subscription.status()).isEqualTo(SubscriptionStatus.ACTIVE);
         assertThat(subscription.currentPeriodStart()).isEqualTo(late);
-        assertThat(subscription.expiredAt()).isNull();
     }
 
     @Test
@@ -181,15 +182,16 @@ class SubscriptionTest {
         assertThatThrownBy(() -> trial.renew(START)).hasFieldOrPropertyWithValue("code", "SUBSCRIPTION_NOT_ACTIVE");
         assertThatThrownBy(() -> trial.scheduleBillingPeriodChange(BillingPeriod.ANNUAL, START))
                 .hasFieldOrPropertyWithValue("code", "SUBSCRIPTION_NOT_ACTIVE");
-        Subscription expired = paid(PaymentProvider.SIMULATED, BillingPeriod.ANNUAL);
-        expired.expireIfDue(expired.validUntil());
-        assertThatThrownBy(() -> expired.scheduleBillingPeriodChange(BillingPeriod.MONTHLY, expired.validUntil()))
+        Subscription expired = paid(BillingPeriod.ANNUAL);
+        Instant afterGrace = expired.accessUntil();
+        expired.expireIfDue(afterGrace);
+        assertThatThrownBy(() -> expired.scheduleBillingPeriodChange(BillingPeriod.MONTHLY, afterGrace))
                 .hasFieldOrPropertyWithValue("code", "SUBSCRIPTION_NOT_ACTIVE");
     }
 
     @Test
     void asking_for_the_current_period_cancels_the_scheduled_change() {
-        Subscription subscription = paid(PaymentProvider.SIMULATED, BillingPeriod.ANNUAL);
+        Subscription subscription = paid(BillingPeriod.ANNUAL);
 
         assertThat(subscription.scheduleBillingPeriodChange(BillingPeriod.ANNUAL, START))
                 .isEqualTo(Subscription.BillingPeriodChange.UNCHANGED);
@@ -197,27 +199,28 @@ class SubscriptionTest {
         assertThat(subscription.scheduleBillingPeriodChange(BillingPeriod.ANNUAL, START))
                 .isEqualTo(Subscription.BillingPeriodChange.CANCELLED);
         assertThat(subscription.pendingBillingPeriod()).isNull();
-        assertThat(subscription.renewsAutomatically(subscription.validUntil())).isTrue();
-        assertThat(subscription.renewsAutomatically(subscription.validUntil().minusSeconds(1))).isFalse();
+        Instant end = subscription.validUntil();
+        assertThat(subscription.renewsAutomatically(PaymentProvider.SIMULATED, end)).isTrue();
+        assertThat(subscription.renewsAutomatically(PaymentProvider.SIMULATED, end.minusSeconds(1))).isFalse();
     }
 
     @Test
-    void restore_with_payment_keeps_the_payment_details() {
-        Subscription.Payment payment = new Subscription.Payment(START.plusSeconds(5), BillingPeriod.MONTHLY,
-                PaymentProvider.STRIPE, "cus_9", "sub_9");
+    void restore_keeps_the_scheduled_change_and_the_period_start_comes_from_the_period_end() {
         Subscription restored = Subscription.restore(UUID.randomUUID(), ORGANIZATION, PlanCode.PRO,
-                BillingPeriod.ANNUAL, SubscriptionStatus.ACTIVE, START, START.plus(Duration.ofDays(365)), null, payment,
-                2L);
+                BillingPeriod.ANNUAL, SubscriptionStatus.ACTIVE, START, START.plus(Duration.ofDays(14)),
+                LocalDate.parse("2027-10-09"), BillingPeriod.MONTHLY, 2L);
 
-        assertThat(restored.payment()).isEqualTo(payment);
-        assertThat(Subscription.Payment.NONE.provider()).isNull();
+        assertThat(restored.pendingBillingPeriod()).isEqualTo(BillingPeriod.MONTHLY);
+        assertThat(restored.currentPeriodStart()).isEqualTo(Instant.parse("2026-10-09T00:00:00Z"));
+        assertThat(restored.validUntil()).isEqualTo(Instant.parse("2027-10-09T00:00:00Z"));
         assertThat(Subscription.restore(UUID.randomUUID(), ORGANIZATION, PlanCode.FREE, null,
-                SubscriptionStatus.TRIAL, START, START.plusSeconds(10), null, 0L).currentPeriodStart()).isEqualTo(START);
+                SubscriptionStatus.TRIAL, START, START.plusSeconds(10), null, null, 0L).currentPeriodStart())
+                .isEqualTo(START);
     }
 
-    private static Subscription paid(PaymentProvider provider, BillingPeriod period) {
+    private static Subscription paid(BillingPeriod period) {
         Subscription subscription = Subscription.startTrial(ORGANIZATION, START, Duration.ofDays(14));
-        subscription.activate(PlanCode.PLUS, period, START, provider, "cus_1", "sub_1");
+        subscription.activate(PlanCode.PLUS, period, START);
         return subscription;
     }
 }

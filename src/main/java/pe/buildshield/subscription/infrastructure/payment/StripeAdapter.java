@@ -24,6 +24,7 @@ import java.math.BigDecimal;
 import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.Locale;
+import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
@@ -32,10 +33,13 @@ import java.util.function.Supplier;
  *
  * <ul>
  *   <li>Checkout: {@code POST /v1/checkout/sessions} en modo {@code subscription}, con {@code Idempotency-Key}, la
- *       organización en {@code client_reference_id} y en los metadatos, y el precio configurado
- *       ({@code STRIPE_PRICE_*}) o en línea ({@code price_data}) desde el catálogo de planes.</li>
+ *       organización en {@code client_reference_id} y en los metadatos (con el plan, la modalidad y la clave del
+ *       cobro), y el precio configurado ({@code STRIPE_PRICE_*}) o en línea ({@code price_data}) desde el catálogo de
+ *       planes. La misma clave devuelve la misma sesión con su URL: por eso no se guardan.</li>
  *   <li>Cambio de modalidad (US12): un {@code subscription_schedule} de dos fases, la actual hasta el fin del periodo y
- *       la nueva modalidad desde el siguiente cobro, sin prorrateo. Volver a la modalidad actual libera el schedule.</li>
+ *       la nueva modalidad desde el siguiente cobro, sin prorrateo. Volver a la modalidad actual libera el schedule.
+ *       La suscripción de Stripe se ubica con {@code GET /v1/subscriptions/search} por la organización de sus
+ *       metadatos.</li>
  * </ul>
  *
  * Cada llamada tiene tiempo máximo de conexión y de respuesta ({@code STRIPE_TIMEOUT}) y pasa por un circuit breaker
@@ -95,6 +99,7 @@ class StripeAdapter implements PaymentGateway {
         form.add("metadata[organizationId]", request.organizationId().toString());
         form.add("metadata[plan]", plan.code().name());
         form.add("metadata[billingPeriod]", request.period().name());
+        form.add("metadata[paymentKey]", request.idempotencyKey().toString());
         form.add("subscription_data[metadata][organizationId]", request.organizationId().toString());
         form.add("subscription_data[metadata][plan]", plan.code().name());
         form.add("line_items[0][quantity]", "1");
@@ -109,13 +114,14 @@ class StripeAdapter implements PaymentGateway {
     }
 
     @Override
-    public void scheduleBillingPeriodChange(String providerSubscriptionId, Plan plan, BillingPeriod current,
+    public void scheduleBillingPeriodChange(UUID organizationId, Plan plan, BillingPeriod current,
             BillingPeriod target) {
         requireConfigured();
+        JsonNode subscription = findSubscription(organizationId);
+        String providerSubscriptionId = subscription.path("id").asText(null);
         if (providerSubscriptionId == null) {
-            throw new UnavailableException("La suscripción no tiene su identificador de Stripe");
+            throw new UnavailableException("Stripe no tiene una suscripción vigente de la organización");
         }
-        JsonNode subscription = get("/v1/subscriptions/" + providerSubscriptionId);
         String schedule = subscription.path("schedule").isTextual() ? subscription.path("schedule").asText() : null;
         if (target == current) {
             if (schedule != null) {
@@ -156,6 +162,15 @@ class StripeAdapter implements PaymentGateway {
         log.info("Stripe: cambio a {} programado para {} desde {}", target, providerSubscriptionId, periodEnd);
     }
 
+    /** La suscripción no cancelada de la organización. La búsqueda de Stripe puede demorar hasta un minuto. */
+    private JsonNode findSubscription(UUID organizationId) {
+        String query = "metadata['organizationId']:'" + organizationId + "' AND -status:'canceled'";
+        return call(() -> http.get()
+                .uri(uri -> uri.path("/v1/subscriptions/search").queryParam("query", "{query}").build(query))
+                .retrieve()
+                .body(String.class)).path("data").path(0);
+    }
+
     /** Precio del ítem: el id configurado o el precio en línea del catálogo (céntimos, recurrente mensual o anual). */
     private void addPrice(MultiValueMap<String, String> form, String prefix, Plan plan, BillingPeriod period,
             boolean withProductData, String product) {
@@ -191,10 +206,6 @@ class StripeAdapter implements PaymentGateway {
                 .body(form)
                 .retrieve()
                 .body(String.class));
-    }
-
-    private JsonNode get(String path) {
-        return call(() -> http.get().uri(path).retrieve().body(String.class));
     }
 
     private JsonNode call(Supplier<String> request) {

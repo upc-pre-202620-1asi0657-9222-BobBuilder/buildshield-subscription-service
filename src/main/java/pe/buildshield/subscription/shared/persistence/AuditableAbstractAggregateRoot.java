@@ -72,6 +72,11 @@ public abstract class AuditableAbstractAggregateRoot<A extends AuditableAbstract
         return createdAt;
     }
 
+    /** Fecha de alta distinta a la de la inserción. Solo sirve antes de insertar: la columna no se actualiza. */
+    protected void overrideCreatedAt(Instant value) {
+        createdAt = value;
+    }
+
     public UUID getCreatedBy() {
         return createdBy;
     }

@@ -1,5 +1,6 @@
 package pe.buildshield.subscription.application;
 
+import pe.buildshield.subscription.domain.model.PaymentProvider;
 import pe.buildshield.subscription.domain.model.Subscription;
 
 import java.time.Instant;
@@ -46,13 +47,14 @@ public final class SubscriptionEvents {
             Instant currentPeriodStart, Instant nextBillingAt, String pendingBillingPeriod, Instant pendingChangeAt,
             String paymentProvider, String reason) {
 
-        static SubscriptionChanged of(Subscription subscription, Integer maxActiveWorksites, String reason) {
+        static SubscriptionChanged of(Subscription subscription, Integer maxActiveWorksites,
+                PaymentProvider provider, String reason) {
             return new SubscriptionChanged(subscription.organizationId(), subscription.id(),
                     subscription.plan().name(), subscription.status().name(), subscription.validUntil(),
                     name(subscription.billingPeriod()), subscription.startedAt(), maxActiveWorksites,
                     subscription.currentPeriodStart(), subscription.nextBillingAt(),
                     name(subscription.pendingBillingPeriod()), subscription.pendingChangeAt(),
-                    name(subscription.paymentProvider()), reason);
+                    name(subscription.paid() ? provider : null), reason);
         }
 
         private static String name(Enum<?> value) {

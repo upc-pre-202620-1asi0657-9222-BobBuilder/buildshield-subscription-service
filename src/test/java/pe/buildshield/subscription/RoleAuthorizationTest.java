@@ -11,7 +11,8 @@ import pe.buildshield.subscription.application.PaymentGateway;
 import pe.buildshield.subscription.application.SubscriptionCommandService;
 import pe.buildshield.subscription.application.SubscriptionQueryService;
 import pe.buildshield.subscription.domain.model.BillingPeriod;
-import pe.buildshield.subscription.domain.model.PaymentCheckout;
+import pe.buildshield.subscription.application.PaymentGateway;
+import pe.buildshield.subscription.domain.model.Payment;
 import pe.buildshield.subscription.domain.model.PaymentProvider;
 import pe.buildshield.subscription.domain.model.Plan;
 import pe.buildshield.subscription.domain.model.PlanCode;
@@ -47,8 +48,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @WebSliceTest
 class RoleAuthorizationTest {
 
-    private static final Plan PLUS = new Plan(PlanCode.PLUS, "Plus", "Hasta 5 obras", 5, false,
-            new BigDecimal("299.00"), new BigDecimal("2990.00"), "PEN");
+    private static final Plan PLUS = new Plan(PlanCode.PLUS, 5, new BigDecimal("299.00"), new BigDecimal("16.67"));
 
     @Autowired
     MockMvc mvc;
@@ -96,11 +96,12 @@ class RoleAuthorizationTest {
 
     @Test
     void only_the_administrator_pays_and_changes_the_billing_period() throws Exception {
-        PaymentCheckout checkout = PaymentCheckout.open(UUID.randomUUID(), organization, "cs_sim_1", PlanCode.PLUS,
-                BillingPeriod.ANNUAL, PaymentProvider.SIMULATED, "http://localhost:4200/suscripcion/pago-simulado",
+        Payment payment = Payment.open(UUID.randomUUID(), organization, UUID.randomUUID(), new BigDecimal("2990.00"),
                 Instant.now());
         when(commands.startCheckout(PlanCode.PLUS, BillingPeriod.ANNUAL))
-                .thenReturn(new SubscriptionCommandService.CheckoutStarted(checkout, PLUS, false));
+                .thenReturn(new SubscriptionCommandService.CheckoutStarted(new PaymentGateway.CheckoutSession(
+                        "cs_sim_1", "http://localhost:4200/suscripcion/pago-simulado"), payment, PLUS,
+                        BillingPeriod.ANNUAL, PaymentProvider.SIMULATED, false));
         when(commands.changeBillingPeriod(BillingPeriod.MONTHLY)).thenReturn(BillingPeriodChange.SCHEDULED);
         when(queries.current()).thenReturn(activeView());
         String checkoutBody = "{\"plan\":\"PLUS\",\"billingPeriod\":\"ANNUAL\"}";

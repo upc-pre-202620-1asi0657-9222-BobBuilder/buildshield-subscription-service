@@ -4,10 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import pe.buildshield.subscription.application.InvalidPaymentWebhookException;
 import pe.buildshield.subscription.application.PaymentEvent;
+import pe.buildshield.subscription.application.SimulatedSession;
 import pe.buildshield.subscription.domain.model.BillingPeriod;
-import pe.buildshield.subscription.domain.model.CheckoutStatus;
-import pe.buildshield.subscription.domain.model.PaymentCheckout;
-import pe.buildshield.subscription.domain.model.PaymentProvider;
 import pe.buildshield.subscription.domain.model.PlanCode;
 import pe.buildshield.subscription.support.MutableClock;
 
@@ -31,15 +29,17 @@ class StripeWebhooksTest {
 
     @Test
     void a_signed_checkout_completed_event_activates_the_organization_session() {
+        UUID key = UUID.randomUUID();
         String payload = """
                 {"id":"evt_1","type":"checkout.session.completed","data":{"object":{"id":"cs_1",
                 "payment_status":"paid","client_reference_id":"%s","customer":"cus_1",
-                "subscription":{"id":"sub_1","object":"subscription"}}}}""".formatted(organization);
+                "invoice":{"id":"in_1","object":"invoice"},
+                "metadata":{"plan":"PLUS","billingPeriod":"ANNUAL","paymentKey":"%s"}}}}""".formatted(organization, key);
 
         PaymentEvent event = webhooks.verify(payload, StripeSignature.header(payload, SECRET, NOW));
 
-        assertThat(event).isEqualTo(new PaymentEvent("evt_1", "checkout.session.completed",
-                PaymentEvent.Type.CHECKOUT_COMPLETED, "cs_1", organization, "cus_1", "sub_1"));
+        assertThat(event).isEqualTo(PaymentEvent.checkoutCompleted("evt_1", "checkout.session.completed", "cs_1",
+                organization, PlanCode.PLUS, BillingPeriod.ANNUAL, key, "in_1"));
     }
 
     @Test
@@ -59,20 +59,30 @@ class StripeWebhooksTest {
                 {"id":"evt_4","type":"checkout.session.completed","data":{"object":{"id":"cs_4",
                 "payment_status":"no_payment_required","client_reference_id":"no-es-uuid"}}}""";
         assertThat(verify(badReference).organizationId()).isNull();
+
+        String badMetadata = """
+                {"id":"evt_4b","type":"checkout.session.completed","data":{"object":{"id":"cs_5",
+                "payment_status":"paid","metadata":{"plan":"GOLD","billingPeriod":"WEEKLY","paymentKey":"x"}}}}""";
+        assertThat(verify(badMetadata).plan()).isNull();
+        assertThat(verify(badMetadata).billingPeriod()).isNull();
+        assertThat(verify(badMetadata).paymentKey()).isNull();
     }
 
     @Test
     void only_renewal_invoices_start_a_new_period() {
         String renewal = """
-                {"id":"evt_5","type":"invoice.paid","data":{"object":{"billing_reason":"subscription_cycle",
-                "customer":"cus_1","subscription":"sub_1"}}}""";
-        assertThat(verify(renewal)).isEqualTo(new PaymentEvent("evt_5", "invoice.paid", PaymentEvent.Type.RENEWAL_PAID,
-                null, null, "cus_1", "sub_1"));
+                {"id":"evt_5","type":"invoice.paid","data":{"object":{"id":"in_5","billing_reason":"subscription_cycle",
+                "amount_paid":29900,"subscription":"sub_1",
+                "subscription_details":{"metadata":{"organizationId":"%s"}}}}}""".formatted(organization);
+        assertThat(verify(renewal)).isEqualTo(PaymentEvent.renewalPaid("evt_5", "invoice.paid", organization, "in_5",
+                new java.math.BigDecimal("299.00")));
 
         String newApi = """
                 {"id":"evt_6","type":"invoice.paid","data":{"object":{"billing_reason":"subscription_cycle",
-                "parent":{"subscription_details":{"subscription":"sub_2"}}}}}""";
-        assertThat(verify(newApi).providerSubscriptionId()).isEqualTo("sub_2");
+                "parent":{"subscription_details":{"subscription":"sub_2",
+                "metadata":{"organizationId":"%s"}}}}}}""".formatted(organization);
+        assertThat(verify(newApi).organizationId()).isEqualTo(organization);
+        assertThat(verify(newApi).amount()).isNull();
 
         String first = """
                 {"id":"evt_7","type":"invoice.paid","data":{"object":{"billing_reason":"subscription_create",
@@ -81,8 +91,7 @@ class StripeWebhooksTest {
 
         String other = """
                 {"id":"evt_8","type":"customer.created","data":{"object":{"id":"cus_1"}}}""";
-        assertThat(verify(other)).isEqualTo(new PaymentEvent("evt_8", "customer.created", PaymentEvent.Type.IGNORED,
-                null, null, null, null));
+        assertThat(verify(other)).isEqualTo(PaymentEvent.ignored("evt_8", "customer.created"));
     }
 
     @Test
@@ -126,19 +135,19 @@ class StripeWebhooksTest {
     void the_simulated_payment_is_a_correctly_signed_checkout_completed_event() {
         StripeWebhooks simulated = new StripeWebhooks(properties(null, true), json, clock);
         UUID key = UUID.randomUUID();
-        PaymentCheckout checkout = PaymentCheckout.restore(UUID.randomUUID(), organization, key, "cs_sim_1",
-                PlanCode.PLUS, BillingPeriod.ANNUAL, PaymentProvider.SIMULATED, "http://web", CheckoutStatus.OPEN, NOW,
-                null, 0L);
+        SimulatedSession session = new SimulatedSession(key, PlanCode.PLUS, BillingPeriod.ANNUAL);
 
-        var webhook = simulated.simulateCheckoutCompleted(checkout, NOW);
+        var webhook = simulated.simulateCheckoutCompleted(session, organization, NOW);
         PaymentEvent event = simulated.verify(webhook.payload(), webhook.signatureHeader());
 
         assertThat(event.type()).isEqualTo(PaymentEvent.Type.CHECKOUT_COMPLETED);
         assertThat(event.eventId()).startsWith("evt_sim_");
-        assertThat(event.sessionId()).isEqualTo("cs_sim_1");
+        assertThat(event.sessionId()).isEqualTo(session.value());
         assertThat(event.organizationId()).isEqualTo(organization);
-        assertThat(event.providerSubscriptionId()).isEqualTo("sub_sim_" + key.toString().replace("-", ""));
-        assertThat(webhook.payload()).contains("\"plan\":\"PLUS\"", "\"billingPeriod\":\"ANNUAL\"");
+        assertThat(event.plan()).isEqualTo(PlanCode.PLUS);
+        assertThat(event.billingPeriod()).isEqualTo(BillingPeriod.ANNUAL);
+        assertThat(event.paymentKey()).isEqualTo(key);
+        assertThat(event.chargeId()).isEqualTo("in_sim_" + key.toString().replace("-", ""));
         assertThatThrownBy(() -> webhooks.verify(webhook.payload(), webhook.signatureHeader()))
                 .isInstanceOf(InvalidPaymentWebhookException.class);
     }

@@ -1,32 +1,30 @@
 package pe.buildshield.subscription.infrastructure.persistence;
 
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import pe.buildshield.subscription.application.ProcessedPaymentEvents;
+import pe.buildshield.subscription.shared.messaging.ProcessedEvents;
 
-import java.sql.Timestamp;
-import java.time.Clock;
+import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 
 /**
- * Webhooks de la pasarela ya procesados ({@code payment_webhook_events}). Con {@code ON CONFLICT DO NOTHING}, dos
- * entregas simultáneas del mismo evento no se aplican dos veces: la segunda espera a la primera y no inserta.
+ * Webhooks de la pasarela ya procesados, en {@code processed_events} con el consumidor {@value #CONSUMER}. El id de
+ * Stripe ({@code evt_...}) se convierte en un uuid determinista; V3 usa el mismo algoritmo con los ya registrados. Con
+ * {@code ON CONFLICT DO NOTHING}, dos entregas simultáneas del mismo evento no se aplican dos veces.
  */
 @Component
 class JdbcProcessedPaymentEvents implements ProcessedPaymentEvents {
 
-    private final JdbcTemplate jdbc;
-    private final Clock clock;
+    static final String CONSUMER = "StripeWebhooks";
 
-    JdbcProcessedPaymentEvents(JdbcTemplate jdbc, Clock clock) {
-        this.jdbc = jdbc;
-        this.clock = clock;
+    private final ProcessedEvents processedEvents;
+
+    JdbcProcessedPaymentEvents(ProcessedEvents processedEvents) {
+        this.processedEvents = processedEvents;
     }
 
     @Override
-    public boolean markProcessed(String eventId, String eventType) {
-        return jdbc.update("""
-                INSERT INTO payment_webhook_events (event_id, event_type, received_at) VALUES (?, ?, ?)
-                ON CONFLICT (event_id) DO NOTHING
-                """, eventId, eventType == null ? "unknown" : eventType, Timestamp.from(clock.instant())) == 1;
+    public boolean markProcessed(String eventId) {
+        return processedEvents.markProcessed(UUID.nameUUIDFromBytes(eventId.getBytes(StandardCharsets.UTF_8)), CONSUMER);
     }
 }

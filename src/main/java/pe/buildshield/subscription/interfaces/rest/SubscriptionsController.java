@@ -108,7 +108,7 @@ class SubscriptionsController {
     @ApiResponse(responseCode = "409", description = "El pago simulado está desactivado (Stripe configurado)",
             content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     SubscriptionResource simulatedPayment(@Parameter(description = "Sesión de pago simulada",
-            example = "cs_sim_9f1c2d3e4a5b4c6d8e7f9a0b1c2d3e4f") @PathVariable String sessionId) {
+            example = "cs_sim_9f1c2d3e4a5b4c6d8e7f9a0b1c2d3e4f_PLUS_ANNUAL") @PathVariable String sessionId) {
         commands.completeSimulatedPayment(sessionId);
         return SubscriptionResource.of(queries.current());
     }
@@ -157,11 +157,10 @@ class SubscriptionsController {
             CheckoutStatus status) {
 
         static CheckoutResource of(CheckoutStarted started) {
-            var checkout = started.checkout();
-            return new CheckoutResource(checkout.sessionId(), checkout.checkoutUrl(), checkout.plan(),
-                    checkout.billingPeriod(), started.plan().price(checkout.billingPeriod()), started.plan().currency(),
-                    checkout.provider(), checkout.provider() == PaymentProvider.SIMULATED, started.reused(),
-                    checkout.status());
+            return new CheckoutResource(started.session().sessionId(), started.session().redirectUrl(),
+                    started.plan().code(), started.period(), started.payment().amount(), started.plan().currency(),
+                    started.provider(), started.provider() == PaymentProvider.SIMULATED, started.reused(),
+                    CheckoutStatus.OPEN);
         }
     }
 

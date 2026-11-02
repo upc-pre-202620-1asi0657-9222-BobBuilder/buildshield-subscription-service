@@ -17,6 +17,7 @@ import pe.buildshield.subscription.shared.messaging.IdempotentEventProcessor;
 public class IamEventConsumer {
 
     static final String ORGANIZATION_REGISTERED = "OrganizationRegistered";
+    static final String CONSUMER = "IamEventConsumer";
 
     private static final Logger log = LoggerFactory.getLogger(IamEventConsumer.class);
 
@@ -30,7 +31,7 @@ public class IamEventConsumer {
 
     @KafkaListener(topics = "${buildshield.messaging.consumes.iam:buildshield.iam}")
     public void onMessage(ConsumerRecord<String, String> record) {
-        processor.process(record, this::handle);
+        processor.process(CONSUMER, record, this::handle);
     }
 
     void handle(EventEnvelope event) {

@@ -28,10 +28,8 @@ class SubscriptionQueryServiceTest {
 
     private static final Instant NOW = Instant.parse("2026-10-08T15:00:00Z");
 
-    private final Plan free = new Plan(PlanCode.FREE, "Free", "Prueba", null, true, BigDecimal.ZERO, BigDecimal.ZERO,
-            "PEN");
-    private final Plan plus = new Plan(PlanCode.PLUS, "Plus", "Hasta 5 obras", 5, false, new BigDecimal("299"),
-            new BigDecimal("2990"), "PEN");
+    private final Plan free = new Plan(PlanCode.FREE, null, BigDecimal.ZERO, BigDecimal.ZERO);
+    private final Plan plus = new Plan(PlanCode.PLUS, 5, new BigDecimal("299"), new BigDecimal("16.67"));
     private final PlanRepository plans = new PlanRepository() {
         @Override
         public List<Plan> findAll() {
@@ -45,7 +43,8 @@ class SubscriptionQueryServiceTest {
     };
     private final InMemorySubscriptions subscriptions = new InMemorySubscriptions();
     private final MutableClock clock = new MutableClock(NOW);
-    private final SubscriptionQueryService queries = new SubscriptionQueryService(plans, subscriptions,
+    private final FakePayments gateway = new FakePayments();
+    private final SubscriptionQueryService queries = new SubscriptionQueryService(plans, subscriptions, gateway,
             new SubscriptionProperties(null, null), clock);
     private final UUID organization = UUID.randomUUID();
 
@@ -73,6 +72,8 @@ class SubscriptionQueryServiceTest {
         assertThat(view.readOnly()).isFalse();
         assertThat(view.organizationId()).isEqualTo(organization);
         assertThat(view.validUntil()).isEqualTo(NOW.plus(Duration.ofDays(14)));
+        assertThat(view.billingPeriod()).isNull();
+        assertThat(view.paymentProvider()).isNull();
     }
 
     @Test
@@ -106,8 +107,8 @@ class SubscriptionQueryServiceTest {
     @Test
     void current_shows_the_paid_plan_with_its_next_billing_date_and_the_scheduled_change() {
         Subscription paid = Subscription.startTrial(organization, NOW, Duration.ofDays(14));
-        paid.activate(PlanCode.PLUS, BillingPeriod.MONTHLY, NOW.plus(Duration.ofDays(2)), PaymentProvider.STRIPE,
-                "cus_1", "sub_1");
+        gateway.provider = PaymentProvider.STRIPE;
+        paid.activate(PlanCode.PLUS, BillingPeriod.MONTHLY, NOW.plus(Duration.ofDays(2)));
         paid.scheduleBillingPeriodChange(BillingPeriod.ANNUAL, NOW.plus(Duration.ofDays(2)));
         subscriptions.save(paid);
         clock.advance(Duration.ofDays(3));
@@ -117,7 +118,7 @@ class SubscriptionQueryServiceTest {
         assertThat(view.plan()).isEqualTo(plus);
         assertThat(view.status()).isEqualTo(SubscriptionStatus.ACTIVE);
         assertThat(view.billingPeriod()).isEqualTo(BillingPeriod.MONTHLY);
-        assertThat(view.currentPeriodStart()).isEqualTo(NOW.plus(Duration.ofDays(2)));
+        assertThat(view.currentPeriodStart()).isEqualTo(Instant.parse("2026-10-10T00:00:00Z"));
         assertThat(view.nextBillingAt()).isEqualTo(view.validUntil());
         assertThat(view.pendingBillingPeriod()).isEqualTo(BillingPeriod.ANNUAL);
         assertThat(view.pendingChangeAt()).isEqualTo(view.validUntil());

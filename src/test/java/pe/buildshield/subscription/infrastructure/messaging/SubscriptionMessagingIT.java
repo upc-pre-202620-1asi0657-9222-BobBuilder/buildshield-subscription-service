@@ -78,9 +78,11 @@ class SubscriptionMessagingIT {
 
         await().atMost(Duration.ofSeconds(30)).until(() -> jdbc.queryForObject(
                 "SELECT count(*) FROM processed_events", Long.class) == 2);
-        assertThat(jdbc.queryForMap("SELECT plan_code, status, billing_period FROM subscriptions WHERE organization_id = ?",
-                organization)).containsEntry("plan_code", "FREE").containsEntry("status", "TRIAL")
-                .containsEntry("billing_period", null);
+        assertThat(jdbc.queryForMap("""
+                SELECT p.code, s.status, s.billing_period, s.period_end FROM subscriptions s
+                JOIN plans p ON p.id = s.plan_id WHERE s.organization_id = ?""",
+                organization)).containsEntry("code", "FREE").containsEntry("status", "TRIAL")
+                .containsEntry("billing_period", "MONTHLY").containsEntry("period_end", null);
         assertThat(jdbc.queryForObject("SELECT count(*) FROM subscriptions", Long.class)).isEqualTo(1);
 
         assertThat(publisher.publishPending()).isEqualTo(1);
@@ -94,6 +96,7 @@ class SubscriptionMessagingIT {
         Instant startedAt = Instant.parse(activated.at("/payload/startedAt").asText());
         assertThat(Duration.between(startedAt, validUntil)).isEqualTo(Duration.ofDays(14));
         assertThat(activated.at("/payload/maxActiveWorksites").isNull()).isTrue();
+        assertThat(activated.at("/payload/billingPeriod").isNull()).isTrue();
         assertThat(activated.at("/payload/reason").asText()).isEqualTo("TRIAL_STARTED");
     }
 

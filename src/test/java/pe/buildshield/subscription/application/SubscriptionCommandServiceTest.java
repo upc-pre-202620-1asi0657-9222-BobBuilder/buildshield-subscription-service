@@ -4,8 +4,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import pe.buildshield.subscription.application.SubscriptionCommandService.WebhookResult;
 import pe.buildshield.subscription.domain.model.BillingPeriod;
-import pe.buildshield.subscription.domain.model.CheckoutStatus;
+import pe.buildshield.subscription.domain.model.Payment;
 import pe.buildshield.subscription.domain.model.PaymentProvider;
+import pe.buildshield.subscription.domain.model.PaymentStatus;
 import pe.buildshield.subscription.domain.model.Plan;
 import pe.buildshield.subscription.domain.model.PlanCode;
 import pe.buildshield.subscription.domain.model.PlanRepository;
@@ -43,12 +44,9 @@ class SubscriptionCommandServiceTest {
 
     private static final Instant NOW = Instant.parse("2026-10-08T15:00:00Z");
 
-    static final Plan FREE = new Plan(PlanCode.FREE, "Free", "Prueba", null, true, BigDecimal.ZERO, BigDecimal.ZERO,
-            "PEN");
-    static final Plan PLUS = new Plan(PlanCode.PLUS, "Plus", "Hasta 5 obras", 5, false, new BigDecimal("299.00"),
-            new BigDecimal("2990.00"), "PEN");
-    static final Plan PRO = new Plan(PlanCode.PRO, "Pro", "Ilimitadas", null, false, new BigDecimal("699.00"),
-            new BigDecimal("6990.00"), "PEN");
+    static final Plan FREE = new Plan(PlanCode.FREE, null, BigDecimal.ZERO, BigDecimal.ZERO);
+    static final Plan PLUS = new Plan(PlanCode.PLUS, 5, new BigDecimal("299.00"), new BigDecimal("16.67"));
+    static final Plan PRO = new Plan(PlanCode.PRO, null, new BigDecimal("699.00"), new BigDecimal("16.67"));
 
     static final PlanRepository PLANS = new PlanRepository() {
         @Override
@@ -63,12 +61,12 @@ class SubscriptionCommandServiceTest {
     };
 
     private final InMemorySubscriptions subscriptions = new InMemorySubscriptions();
-    private final InMemoryCheckouts checkouts = new InMemoryCheckouts();
+    private final InMemoryPayments charges = new InMemoryPayments();
     private final FakePayments payments = new FakePayments();
     private final OutboxWriter outbox = mock(OutboxWriter.class);
     private final MutableClock clock = new MutableClock(NOW);
     private final TestTransactions transactions = new TestTransactions();
-    private final SubscriptionCommandService commands = new SubscriptionCommandService(subscriptions, checkouts, PLANS,
+    private final SubscriptionCommandService commands = new SubscriptionCommandService(subscriptions, charges, PLANS,
             payments, payments, payments, outbox, new SubscriptionProperties(14, Duration.ofMinutes(1)), transactions,
             clock);
     private final UUID organization = UUID.randomUUID();
@@ -129,7 +127,6 @@ class SubscriptionCommandServiceTest {
 
         assertThat(expired).isEqualTo(1);
         assertThat(subscriptions.byOrganization.get(early).status()).isEqualTo(SubscriptionStatus.EXPIRED);
-        assertThat(subscriptions.byOrganization.get(early).expiredAt()).isEqualTo(clock.instant());
         assertThat(subscriptions.byOrganization.get(late).status()).isEqualTo(SubscriptionStatus.TRIAL);
         assertThat(subscriptions.systemModeQueries).containsOnly(true);
         verify(outbox).append(eq(early), isNull(), eq("SubscriptionExpired"), eq("SUBSCRIPTION"),
@@ -149,25 +146,28 @@ class SubscriptionCommandServiceTest {
 
         assertThat(first.reused()).isFalse();
         assertThat(first.plan()).isEqualTo(PLUS);
-        assertThat(first.checkout().status()).isEqualTo(CheckoutStatus.OPEN);
-        assertThat(first.checkout().provider()).isEqualTo(PaymentProvider.SIMULATED);
+        assertThat(first.payment().status()).isEqualTo(PaymentStatus.PENDING);
+        assertThat(first.payment().amount()).isEqualByComparingTo("2990.00");
+        assertThat(first.payment().subscriptionId()).isEqualTo(subscriptions.byOrganization.get(organization).id());
+        assertThat(first.provider()).isEqualTo(PaymentProvider.SIMULATED);
         assertThat(payments.checkoutRequests).singleElement().satisfies(request -> {
             assertThat(request.organizationId()).isEqualTo(organization);
             assertThat(request.plan()).isEqualTo(PLUS);
             assertThat(request.period()).isEqualTo(BillingPeriod.ANNUAL);
-            assertThat(request.idempotencyKey()).isEqualTo(first.checkout().idempotencyKey());
+            assertThat(request.idempotencyKey()).isEqualTo(first.payment().idempotencyKey());
         });
 
         clock.advance(Duration.ofMinutes(10));
         var again = asAdmin(() -> commands.startCheckout(PlanCode.PLUS, BillingPeriod.ANNUAL));
         assertThat(again.reused()).isTrue();
-        assertThat(again.checkout().sessionId()).isEqualTo(first.checkout().sessionId());
+        assertThat(again.session()).isEqualTo(first.session());
+        assertThat(charges.byId).hasSize(1);
 
         var monthly = asAdmin(() -> commands.startCheckout(PlanCode.PLUS, BillingPeriod.MONTHLY));
         assertThat(monthly.reused()).isFalse();
         clock.advance(Duration.ofMinutes(25));
         assertThat(asAdmin(() -> commands.startCheckout(PlanCode.PLUS, BillingPeriod.ANNUAL)).reused()).isFalse();
-        assertThat(payments.checkoutRequests).hasSize(3);
+        assertThat(charges.byId).hasSize(3);
     }
 
     @Test
@@ -192,7 +192,7 @@ class SubscriptionCommandServiceTest {
 
         assertThatThrownBy(() -> asAdmin(() -> commands.startCheckout(PlanCode.PLUS, BillingPeriod.MONTHLY)))
                 .isInstanceOf(PaymentGateway.UnavailableException.class);
-        assertThat(checkouts.byId).isEmpty();
+        assertThat(charges.byId).isEmpty();
     }
 
     @Test
@@ -201,32 +201,47 @@ class SubscriptionCommandServiceTest {
         var started = asAdmin(() -> commands.startCheckout(PlanCode.PLUS, BillingPeriod.ANNUAL));
         clock.advance(Duration.ofMinutes(2));
 
-        WebhookResult result = asAdmin(() -> commands.completeSimulatedPayment(started.checkout().sessionId()));
+        WebhookResult result = asAdmin(() -> commands.completeSimulatedPayment(started.session().sessionId()));
 
         assertThat(result).isEqualTo(WebhookResult.PROCESSED);
         Subscription active = subscriptions.byOrganization.get(organization);
         assertThat(active.status()).isEqualTo(SubscriptionStatus.ACTIVE);
         assertThat(active.plan()).isEqualTo(PlanCode.PLUS);
         assertThat(active.billingPeriod()).isEqualTo(BillingPeriod.ANNUAL);
-        assertThat(active.currentPeriodStart()).isEqualTo(clock.instant());
-        assertThat(active.validUntil()).isEqualTo(Instant.parse("2027-10-08T15:02:00Z"));
-        assertThat(active.paymentProvider()).isEqualTo(PaymentProvider.SIMULATED);
-        assertThat(active.paymentSubscriptionId()).startsWith("sub_sim_");
-        assertThat(checkouts.byId.values()).singleElement()
-                .satisfies(checkout -> assertThat(checkout.status()).isEqualTo(CheckoutStatus.COMPLETED));
+        assertThat(active.currentPeriodStart()).isEqualTo(Instant.parse("2026-10-08T00:00:00Z"));
+        assertThat(active.validUntil()).isEqualTo(Instant.parse("2027-10-08T00:00:00Z"));
+        assertThat(charges.byId.values()).singleElement().satisfies(charge -> {
+            assertThat(charge.status()).isEqualTo(PaymentStatus.PAID);
+            assertThat(charge.gatewayChargeId()).startsWith("in_sim_");
+        });
         verify(outbox).append(eq(organization), isNull(), eq("SubscriptionActivated"), eq("SUBSCRIPTION"),
                 eq(active.id()), argThat(payload -> {
                     var changed = (SubscriptionEvents.SubscriptionChanged) payload;
                     return changed.status().equals("ACTIVE") && changed.plan().equals("PLUS")
                             && changed.maxActiveWorksites() == 5 && changed.reason().equals("PAYMENT_CONFIRMED")
                             && changed.nextBillingAt().equals(active.validUntil())
-                            && changed.billingPeriod().equals("ANNUAL");
+                            && changed.billingPeriod().equals("ANNUAL")
+                            && changed.paymentProvider().equals("SIMULATED");
                 }));
 
-        assertThat(asAdmin(() -> commands.completeSimulatedPayment(started.checkout().sessionId())))
+        assertThat(asAdmin(() -> commands.completeSimulatedPayment(started.session().sessionId())))
                 .isEqualTo(WebhookResult.IGNORED);
         assertThatThrownBy(() -> asAdmin(() -> commands.completeSimulatedPayment("cs_no_existe")))
                 .isInstanceOf(ResourceNotFoundException.class).hasFieldOrPropertyWithValue("code", "CHECKOUT_NOT_FOUND");
+        String otherKey = new SimulatedSession(UUID.randomUUID(), PlanCode.PLUS, BillingPeriod.ANNUAL).value();
+        assertThatThrownBy(() -> asAdmin(() -> commands.completeSimulatedPayment(otherKey)))
+                .isInstanceOf(ResourceNotFoundException.class).hasFieldOrPropertyWithValue("code", "CHECKOUT_NOT_FOUND");
+    }
+
+    @Test
+    void the_simulated_session_cannot_pay_a_different_plan_than_its_payment() {
+        trial();
+        var started = asAdmin(() -> commands.startCheckout(PlanCode.PLUS, BillingPeriod.MONTHLY));
+        String altered = started.session().sessionId().replace("_PLUS_MONTHLY", "_PRO_ANNUAL");
+
+        assertThatThrownBy(() -> asAdmin(() -> commands.completeSimulatedPayment(altered)))
+                .isInstanceOf(ResourceNotFoundException.class).hasFieldOrPropertyWithValue("code", "CHECKOUT_NOT_FOUND");
+        assertThat(subscriptions.byOrganization.get(organization).status()).isEqualTo(SubscriptionStatus.TRIAL);
     }
 
     @Test
@@ -242,8 +257,9 @@ class SubscriptionCommandServiceTest {
     void a_repeated_webhook_is_applied_once_and_an_unsigned_one_is_rejected() {
         trial();
         var started = asAdmin(() -> commands.startCheckout(PlanCode.PRO, BillingPeriod.MONTHLY));
-        String body = payments.willDeliver(new PaymentEvent("evt_1", "checkout.session.completed",
-                PaymentEvent.Type.CHECKOUT_COMPLETED, started.checkout().sessionId(), organization, "cus_1", "sub_1"));
+        String body = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_1", "checkout.session.completed",
+                started.session().sessionId(), organization, PlanCode.PRO, BillingPeriod.MONTHLY,
+                started.payment().idempotencyKey(), "in_1"));
 
         assertThatThrownBy(() -> commands.receiveWebhook(body, "firma-falsa"))
                 .isInstanceOf(InvalidPaymentWebhookException.class)
@@ -253,8 +269,8 @@ class SubscriptionCommandServiceTest {
 
         Subscription active = subscriptions.byOrganization.get(organization);
         assertThat(active.plan()).isEqualTo(PlanCode.PRO);
-        assertThat(active.paymentCustomerId()).isEqualTo("cus_1");
-        assertThat(active.paymentSubscriptionId()).isEqualTo("sub_1");
+        assertThat(charges.byId.values()).singleElement()
+                .satisfies(charge -> assertThat(charge.gatewayChargeId()).isEqualTo("in_1"));
         verify(outbox, times(1)).append(eq(organization), isNull(), eq("SubscriptionActivated"), any(), any(),
                 argThat(payload -> ((SubscriptionEvents.SubscriptionChanged) payload).status().equals("ACTIVE")));
         assertThat(TenantContext.current()).isEmpty();
@@ -262,37 +278,55 @@ class SubscriptionCommandServiceTest {
 
     @Test
     void webhooks_without_effect_are_recorded_and_ignored() {
-        String other = payments.willDeliver(new PaymentEvent("evt_2", "customer.created", PaymentEvent.Type.IGNORED,
-                null, null, null, null));
-        String noOrganization = payments.willDeliver(new PaymentEvent("evt_3", "checkout.session.completed",
-                PaymentEvent.Type.CHECKOUT_COMPLETED, "cs_x", null, null, null));
-        String unknownRenewal = payments.willDeliver(new PaymentEvent("evt_4", "invoice.paid",
-                PaymentEvent.Type.RENEWAL_PAID, null, null, "cus_x", "sub_desconocida"));
-        String renewalWithoutSubscription = payments.willDeliver(new PaymentEvent("evt_5", "invoice.paid",
-                PaymentEvent.Type.RENEWAL_PAID, null, null, null, null));
-        String unknownSession = payments.willDeliver(new PaymentEvent("evt_6", "checkout.session.completed",
-                PaymentEvent.Type.CHECKOUT_COMPLETED, "cs_de_otro_lado", organization, null, null));
+        String other = payments.willDeliver(PaymentEvent.ignored("evt_2", "customer.created"));
+        String noOrganization = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_3",
+                "checkout.session.completed", "cs_x", null, null, null, null, null));
+        String unknownRenewal = payments.willDeliver(PaymentEvent.renewalPaid("evt_4", "invoice.paid",
+                UUID.randomUUID(), "in_x", null));
+        String renewalWithoutOrganization = payments.willDeliver(PaymentEvent.renewalPaid("evt_5", "invoice.paid",
+                null, null, null));
+        String unknownSession = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_6",
+                "checkout.session.completed", "cs_de_otro_lado", organization, null, null, null, null));
+        String unknownKey = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_7", "checkout.session.completed",
+                "cs_y", organization, PlanCode.PLUS, BillingPeriod.ANNUAL, UUID.randomUUID(), null));
 
         assertThat(commands.receiveWebhook(other, "ok")).isEqualTo(WebhookResult.IGNORED);
         assertThat(commands.receiveWebhook(other, "ok")).isEqualTo(WebhookResult.DUPLICATE);
         assertThat(commands.receiveWebhook(noOrganization, "ok")).isEqualTo(WebhookResult.IGNORED);
         assertThat(commands.receiveWebhook(unknownRenewal, "ok")).isEqualTo(WebhookResult.IGNORED);
-        assertThat(commands.receiveWebhook(renewalWithoutSubscription, "ok")).isEqualTo(WebhookResult.IGNORED);
+        assertThat(commands.receiveWebhook(renewalWithoutOrganization, "ok")).isEqualTo(WebhookResult.IGNORED);
         assertThat(commands.receiveWebhook(unknownSession, "ok")).isEqualTo(WebhookResult.IGNORED);
-        assertThat(payments.processed).contains("evt_2", "evt_3", "evt_4", "evt_5", "evt_6");
+        assertThat(commands.receiveWebhook(unknownKey, "ok")).isEqualTo(WebhookResult.IGNORED);
+        assertThat(payments.processed).contains("evt_2", "evt_3", "evt_4", "evt_5", "evt_6", "evt_7");
         verify(outbox, never()).append(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void a_session_opened_before_the_migration_completes_the_pending_payment_of_its_amount() {
+        trial();
+        payments.provider = PaymentProvider.STRIPE;
+        var started = asAdmin(() -> commands.startCheckout(PlanCode.PLUS, BillingPeriod.ANNUAL));
+        String body = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_legacy", "checkout.session.completed",
+                "cs_vieja", organization, PlanCode.PLUS, BillingPeriod.ANNUAL, null, "in_legacy"));
+
+        assertThat(commands.receiveWebhook(body, "ok")).isEqualTo(WebhookResult.PROCESSED);
+
+        assertThat(subscriptions.byOrganization.get(organization).plan()).isEqualTo(PlanCode.PLUS);
+        Payment charge = charges.byId.get(started.payment().id());
+        assertThat(charge.status()).isEqualTo(PaymentStatus.PAID);
+        assertThat(charge.gatewayChargeId()).isEqualTo("in_legacy");
     }
 
     @Test
     void a_paid_renewal_starts_the_next_period_with_the_scheduled_billing_period() {
         trial();
         payments.provider = PaymentProvider.STRIPE;
-        pay(PlanCode.PLUS, BillingPeriod.MONTHLY, "sub_stripe_1");
+        pay(PlanCode.PLUS, BillingPeriod.MONTHLY, "in_stripe_1");
         Instant firstEnd = subscriptions.byOrganization.get(organization).validUntil();
 
         BillingPeriodChange change = asAdmin(() -> commands.changeBillingPeriod(BillingPeriod.ANNUAL));
         assertThat(change).isEqualTo(BillingPeriodChange.SCHEDULED);
-        assertThat(payments.scheduledChanges).containsExactly("sub_stripe_1:MONTHLY->ANNUAL");
+        assertThat(payments.scheduledChanges).containsExactly(organization + ":MONTHLY->ANNUAL");
         assertThat(subscriptions.byOrganization.get(organization).pendingBillingPeriod()).isEqualTo(BillingPeriod.ANNUAL);
         verify(outbox).append(eq(organization), isNull(), eq("SubscriptionBillingPeriodChangeScheduled"), any(), any(),
                 argThat(payload -> {
@@ -302,23 +336,28 @@ class SubscriptionCommandServiceTest {
                 }));
 
         clock.setTo(firstEnd.plusSeconds(3600));
-        String renewal = payments.willDeliver(new PaymentEvent("evt_r1", "invoice.paid",
-                PaymentEvent.Type.RENEWAL_PAID, null, null, "cus_1", "sub_stripe_1"));
+        String renewal = payments.willDeliver(PaymentEvent.renewalPaid("evt_r1", "invoice.paid", organization, "in_r1",
+                new BigDecimal("2990.00")));
         assertThat(commands.receiveWebhook(renewal, "ok")).isEqualTo(WebhookResult.PROCESSED);
 
         Subscription renewed = subscriptions.byOrganization.get(organization);
         assertThat(renewed.billingPeriod()).isEqualTo(BillingPeriod.ANNUAL);
         assertThat(renewed.pendingBillingPeriod()).isNull();
-        assertThat(renewed.currentPeriodStart()).isEqualTo(clock.instant());
-        assertThat(renewed.validUntil()).isEqualTo(BillingPeriod.ANNUAL.periodEnd(clock.instant()));
-        assertThat(subscriptions.systemModeQueries).contains(true);
+        assertThat(renewed.currentPeriodStart()).isEqualTo(firstEnd);
+        assertThat(renewed.validUntil()).isEqualTo(BillingPeriod.ANNUAL.periodEnd(firstEnd));
+        assertThat(charges.byId.values()).filteredOn(charge -> "in_r1".equals(charge.gatewayChargeId())).singleElement()
+                .satisfies(charge -> {
+                    assertThat(charge.status()).isEqualTo(PaymentStatus.PAID);
+                    assertThat(charge.amount()).isEqualByComparingTo("2990.00");
+                    assertThat(charge.subscriptionId()).isEqualTo(renewed.id());
+                });
     }
 
     @Test
     void asking_for_the_current_billing_period_cancels_the_scheduled_change_or_does_nothing() {
         trial();
         payments.provider = PaymentProvider.STRIPE;
-        pay(PlanCode.PRO, BillingPeriod.ANNUAL, "sub_stripe_2");
+        pay(PlanCode.PRO, BillingPeriod.ANNUAL, "in_stripe_2");
 
         assertThat(asAdmin(() -> commands.changeBillingPeriod(BillingPeriod.ANNUAL)))
                 .isEqualTo(BillingPeriodChange.UNCHANGED);
@@ -327,8 +366,8 @@ class SubscriptionCommandServiceTest {
                 .isEqualTo(BillingPeriodChange.SCHEDULED);
         assertThat(asAdmin(() -> commands.changeBillingPeriod(BillingPeriod.ANNUAL)))
                 .isEqualTo(BillingPeriodChange.CANCELLED);
-        assertThat(payments.scheduledChanges).containsExactly("sub_stripe_2:ANNUAL->MONTHLY",
-                "sub_stripe_2:ANNUAL->ANNUAL");
+        assertThat(payments.scheduledChanges).containsExactly(organization + ":ANNUAL->MONTHLY",
+                organization + ":ANNUAL->ANNUAL");
         assertThat(subscriptions.byOrganization.get(organization).pendingBillingPeriod()).isNull();
     }
 
@@ -339,7 +378,7 @@ class SubscriptionCommandServiceTest {
                 .isInstanceOf(ConflictException.class).hasFieldOrPropertyWithValue("code", "SUBSCRIPTION_NOT_ACTIVE");
 
         payments.provider = PaymentProvider.STRIPE;
-        pay(PlanCode.PLUS, BillingPeriod.MONTHLY, "sub_stripe_3");
+        pay(PlanCode.PLUS, BillingPeriod.MONTHLY, "in_stripe_3");
         payments.failure = new PaymentGateway.UnavailableException("Stripe no responde");
         assertThatThrownBy(() -> asAdmin(() -> commands.changeBillingPeriod(BillingPeriod.ANNUAL)))
                 .isInstanceOf(PaymentGateway.UnavailableException.class);
@@ -362,6 +401,8 @@ class SubscriptionCommandServiceTest {
         assertThat(renewed.status()).isEqualTo(SubscriptionStatus.ACTIVE);
         assertThat(renewed.billingPeriod()).isEqualTo(BillingPeriod.ANNUAL);
         assertThat(renewed.currentPeriodStart()).isEqualTo(end);
+        assertThat(charges.byId).hasSize(2);
+        assertThat(charges.byId.values()).allSatisfy(charge -> assertThat(charge.status()).isEqualTo(PaymentStatus.PAID));
         verify(outbox).append(eq(organization), isNull(), eq("SubscriptionActivated"), any(), any(),
                 argThat(payload -> ((SubscriptionEvents.SubscriptionChanged) payload).reason().equals("RENEWED")));
     }
@@ -372,15 +413,15 @@ class SubscriptionCommandServiceTest {
 
     private void pay(PlanCode plan, BillingPeriod period) {
         var started = asAdmin(() -> commands.startCheckout(plan, period));
-        assertThat(asAdmin(() -> commands.completeSimulatedPayment(started.checkout().sessionId())))
+        assertThat(asAdmin(() -> commands.completeSimulatedPayment(started.session().sessionId())))
                 .isEqualTo(WebhookResult.PROCESSED);
     }
 
-    private void pay(PlanCode plan, BillingPeriod period, String providerSubscription) {
+    private void pay(PlanCode plan, BillingPeriod period, String chargeId) {
         var started = asAdmin(() -> commands.startCheckout(plan, period));
-        String body = payments.willDeliver(new PaymentEvent("evt_" + UUID.randomUUID(), "checkout.session.completed",
-                PaymentEvent.Type.CHECKOUT_COMPLETED, started.checkout().sessionId(), organization, "cus_1",
-                providerSubscription));
+        String body = payments.willDeliver(PaymentEvent.checkoutCompleted("evt_" + UUID.randomUUID(),
+                "checkout.session.completed", started.session().sessionId(), organization, plan, period,
+                started.payment().idempotencyKey(), chargeId));
         assertThat(commands.receiveWebhook(body, "ok")).isEqualTo(WebhookResult.PROCESSED);
     }
 

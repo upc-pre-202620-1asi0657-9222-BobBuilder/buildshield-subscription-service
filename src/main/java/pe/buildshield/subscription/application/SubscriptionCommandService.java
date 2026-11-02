@@ -10,9 +10,9 @@ import pe.buildshield.subscription.application.PaymentGateway.CheckoutRequest;
 import pe.buildshield.subscription.application.PaymentGateway.CheckoutSession;
 import pe.buildshield.subscription.application.PaymentWebhooks.SignedWebhook;
 import pe.buildshield.subscription.domain.model.BillingPeriod;
-import pe.buildshield.subscription.domain.model.PaymentCheckout;
-import pe.buildshield.subscription.domain.model.PaymentCheckoutRepository;
+import pe.buildshield.subscription.domain.model.Payment;
 import pe.buildshield.subscription.domain.model.PaymentProvider;
+import pe.buildshield.subscription.domain.model.PaymentRepository;
 import pe.buildshield.subscription.domain.model.Plan;
 import pe.buildshield.subscription.domain.model.PlanCode;
 import pe.buildshield.subscription.domain.model.PlanRepository;
@@ -27,6 +27,8 @@ import pe.buildshield.subscription.shared.messaging.OutboxWriter;
 import pe.buildshield.subscription.shared.tenant.TenantContext;
 import pe.buildshield.subscription.shared.tenant.TenantInfo;
 
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
@@ -58,7 +60,7 @@ public class SubscriptionCommandService {
     private static final Logger log = LoggerFactory.getLogger(SubscriptionCommandService.class);
 
     private final SubscriptionRepository subscriptions;
-    private final PaymentCheckoutRepository checkouts;
+    private final PaymentRepository payments;
     private final PlanRepository plans;
     private final PaymentGateway gateway;
     private final PaymentWebhooks webhooks;
@@ -68,12 +70,12 @@ public class SubscriptionCommandService {
     private final TransactionTemplate transactions;
     private final Clock clock;
 
-    public SubscriptionCommandService(SubscriptionRepository subscriptions, PaymentCheckoutRepository checkouts,
+    public SubscriptionCommandService(SubscriptionRepository subscriptions, PaymentRepository payments,
             PlanRepository plans, PaymentGateway gateway, PaymentWebhooks webhooks,
             ProcessedPaymentEvents processedPayments, OutboxWriter outbox, SubscriptionProperties properties,
             PlatformTransactionManager transactionManager, Clock clock) {
         this.subscriptions = subscriptions;
-        this.checkouts = checkouts;
+        this.payments = payments;
         this.plans = plans;
         this.gateway = gateway;
         this.webhooks = webhooks;
@@ -134,9 +136,10 @@ public class SubscriptionCommandService {
         if (subscription == null) {
             return false;
         }
-        if (subscription.renewsAutomatically(now)) {
+        if (subscription.renewsAutomatically(gateway.provider(), now)) {
             subscription.renew(subscription.validUntil());
             Subscription saved = subscriptions.save(subscription);
+            recordRenewalPayment(saved, "simulated-" + saved.id() + "-" + saved.periodEnd(), null, null);
             announce(SubscriptionEvents.SUBSCRIPTION_ACTIVATED, saved, SubscriptionEvents.REASON_RENEWED);
             log.info("Suscripción simulada de la organización {} renovada hasta {}", saved.organizationId(),
                     saved.validUntil());
@@ -152,9 +155,9 @@ public class SubscriptionCommandService {
     }
 
     /**
-     * US07 y US09: abre la sesión de pago del plan y la modalidad elegidos para la organización del contexto. Si
-     * hay una sesión abierta reciente del mismo plan y modalidad, la reutiliza (doble clic o recarga de la página).
-     * La clave de idempotencia de la pasarela es el id local de la sesión.
+     * US07 y US09: abre la sesión de pago del plan y la modalidad elegidos para la organización del contexto y deja
+     * su cobro pendiente. Si hay un cobro pendiente reciente del mismo monto, repite la llamada con su clave de
+     * idempotencia: la pasarela devuelve la misma sesión con su URL (doble clic o recarga de la página).
      *
      * @throws ConflictException             si la organización ya tiene una suscripción pagada vigente
      * @throws PaymentGateway.UnavailableException si la pasarela no responde (503)
@@ -163,29 +166,31 @@ public class SubscriptionCommandService {
         UUID organizationId = TenantContext.require().organizationId();
         Instant now = clock.instant();
         Plan plan = plan(planCode).requirePayable();
-        PaymentProvider provider = gateway.provider();
-        PaymentCheckout reusable = transactions.execute(status -> {
+        BigDecimal amount = plan.price(period);
+        PendingCheckout pending = transactions.execute(status -> {
             Subscription current = currentSubscription();
             if (current.status() == SubscriptionStatus.ACTIVE && !current.readOnly(now)) {
                 throw new ConflictException(SUBSCRIPTION_ALREADY_ACTIVE, "Tu organización ya tiene el plan "
                         + current.plan() + " pagado y vigente; para cambiar entre mensual y anual usa el cambio de "
                         + "modalidad");
             }
-            return checkouts.findOpen().stream()
-                    .filter(checkout -> checkout.reusableFor(planCode, period, provider, now))
-                    .findFirst().orElse(null);
+            return new PendingCheckout(current.id(), payments.findPending().stream()
+                    .filter(payment -> payment.reusableFor(amount, now))
+                    .findFirst().orElse(null));
         });
-        if (reusable != null) {
-            return new CheckoutStarted(reusable, plan, true);
-        }
-        UUID idempotencyKey = UUID.randomUUID();
+        Payment reusable = pending.reusable();
+        UUID idempotencyKey = reusable != null ? reusable.idempotencyKey() : UUID.randomUUID();
         CheckoutSession session = gateway.startCheckout(new CheckoutRequest(idempotencyKey, organizationId, plan,
                 period));
-        PaymentCheckout saved = transactions.execute(status -> checkouts.save(PaymentCheckout.open(idempotencyKey,
-                organizationId, session.sessionId(), planCode, period, provider, session.redirectUrl(), now)));
+        PaymentProvider provider = gateway.provider();
+        if (reusable != null) {
+            return new CheckoutStarted(session, reusable, plan, period, provider, true);
+        }
+        Payment saved = transactions.execute(status -> payments.save(Payment.open(pending.subscriptionId(),
+                organizationId, idempotencyKey, amount, now)));
         log.info("Sesión de pago {} ({}, {}) abierta para la organización {}", session.sessionId(), planCode, period,
                 organizationId);
-        return new CheckoutStarted(saved, plan, false);
+        return new CheckoutStarted(session, saved, plan, period, provider, false);
     }
 
     /**
@@ -197,18 +202,28 @@ public class SubscriptionCommandService {
             throw new ConflictException(PAYMENT_SIMULATION_DISABLED,
                     "El pago simulado solo existe en desarrollo local, sin clave de Stripe configurada");
         }
-        PaymentCheckout checkout = transactions.execute(status -> checkouts.findBySessionId(sessionId))
+        SimulatedSession session = SimulatedSession.parse(sessionId)
+                .filter(this::matchesItsPayment)
                 .orElseThrow(() -> new ResourceNotFoundException(CHECKOUT_NOT_FOUND,
                         "La sesión de pago " + sessionId + " no existe"));
-        SignedWebhook webhook = webhooks.simulateCheckoutCompleted(checkout, clock.instant());
+        SignedWebhook webhook = webhooks.simulateCheckoutCompleted(session, TenantContext.require().organizationId(),
+                clock.instant());
         return receiveWebhook(webhook.payload(), webhook.signatureHeader());
+    }
+
+    /** El plan y la modalidad vienen en la URL: deben corresponder al monto del cobro guardado de esa clave. */
+    private boolean matchesItsPayment(SimulatedSession session) {
+        Optional<Payment> payment = transactions.execute(status -> payments.findByIdempotencyKey(session.paymentKey()));
+        return payment != null && payment.isPresent()
+                && payment.get().amount().compareTo(plan(session.plan()).price(session.period())) == 0;
     }
 
     /**
      * Webhook de la pasarela (T74): verifica la firma, descarta los eventos repetidos por su id y aplica el efecto
-     * en una transacción con la organización del pago. {@code checkout.session.completed} activa la suscripción
-     * con el plan y la modalidad de la sesión guardada (no con los que vengan en el evento); {@code invoice.paid}
-     * de una renovación empieza el siguiente periodo. Los demás eventos se registran y se ignoran.
+     * en una transacción con la organización del pago. {@code checkout.session.completed} completa el cobro de la
+     * clave que viene en los metadatos firmados de la sesión y activa la suscripción con su plan y modalidad;
+     * {@code invoice.paid} de una renovación empieza el siguiente periodo y registra el cobro. Los demás eventos se
+     * registran y se ignoran.
      *
      * @throws InvalidPaymentWebhookException si la firma no es válida (400)
      */
@@ -218,26 +233,26 @@ public class SubscriptionCommandService {
             case CHECKOUT_COMPLETED -> event.organizationId() == null
                     ? ignore(event, "la sesión no trae la organización")
                     : inOrganization(event.organizationId(), () -> checkoutCompleted(event));
-            case RENEWAL_PAID -> renewalOrganization(event)
-                    .map(organizationId -> inOrganization(organizationId, () -> renewalPaid(event)))
-                    .orElseGet(() -> ignore(event, "la suscripción de la pasarela no es de ninguna organización"));
+            case RENEWAL_PAID -> event.organizationId() == null
+                    ? ignore(event, "la factura no trae la organización en los metadatos de la suscripción")
+                    : inOrganization(event.organizationId(), () -> renewalPaid(event));
             case IGNORED -> ignore(event, "tipo de evento sin efecto");
         };
     }
 
     private WebhookResult checkoutCompleted(PaymentEvent event) {
-        if (!processedPayments.markProcessed(event.eventId(), event.providerType())) {
+        if (!processedPayments.markProcessed(event.eventId())) {
             return WebhookResult.DUPLICATE;
         }
-        PaymentCheckout checkout = checkouts.findBySessionId(event.sessionId()).orElse(null);
-        if (checkout == null || !checkout.complete(clock.instant())) {
-            log.warn("Evento {}: la sesión {} no existe o ya estaba pagada", event.eventId(), event.sessionId());
+        Payment payment = paymentOf(event).orElse(null);
+        if (payment == null || event.plan() == null || event.billingPeriod() == null
+                || !payment.complete(event.chargeId())) {
+            log.warn("Evento {}: la sesión {} no tiene un cobro pendiente", event.eventId(), event.sessionId());
             return WebhookResult.IGNORED;
         }
-        checkouts.save(checkout);
+        payments.save(payment);
         Subscription subscription = currentSubscription();
-        subscription.activate(checkout.plan(), checkout.billingPeriod(), clock.instant(), checkout.provider(),
-                event.customerId(), event.providerSubscriptionId());
+        subscription.activate(event.plan(), event.billingPeriod(), clock.instant());
         Subscription saved = subscriptions.save(subscription);
         announce(SubscriptionEvents.SUBSCRIPTION_ACTIVATED, saved, SubscriptionEvents.REASON_PAYMENT_CONFIRMED);
         log.info("Pago confirmado: organización {} con el plan {} {} hasta {}", saved.organizationId(), saved.plan(),
@@ -245,30 +260,49 @@ public class SubscriptionCommandService {
         return WebhookResult.PROCESSED;
     }
 
+    /**
+     * El cobro de la sesión, por la clave de los metadatos. Una sesión abierta antes de la migración V3 no trae la
+     * clave: se busca el cobro pendiente más reciente del monto de ese plan y modalidad.
+     */
+    private Optional<Payment> paymentOf(PaymentEvent event) {
+        if (event.paymentKey() != null) {
+            return payments.findByIdempotencyKey(event.paymentKey());
+        }
+        if (event.plan() == null || event.billingPeriod() == null) {
+            return Optional.empty();
+        }
+        BigDecimal amount = plan(event.plan()).price(event.billingPeriod());
+        return payments.findPending().stream().filter(payment -> payment.matchesPending(amount)).findFirst();
+    }
+
     private WebhookResult renewalPaid(PaymentEvent event) {
-        if (!processedPayments.markProcessed(event.eventId(), event.providerType())) {
+        if (!processedPayments.markProcessed(event.eventId())) {
             return WebhookResult.DUPLICATE;
         }
-        Subscription subscription = currentSubscription();
+        Subscription subscription = subscriptions.findCurrent().orElse(null);
+        if (subscription == null) {
+            log.warn("Evento {}: la organización {} no tiene suscripción", event.eventId(), event.organizationId());
+            return WebhookResult.IGNORED;
+        }
         boolean periodChanged = subscription.renew(clock.instant());
         Subscription saved = subscriptions.save(subscription);
+        recordRenewalPayment(saved, event.eventId(), event.chargeId(), event.amount());
         announce(SubscriptionEvents.SUBSCRIPTION_ACTIVATED, saved, SubscriptionEvents.REASON_RENEWED);
         log.info("Renovación cobrada: organización {} hasta {}{}", saved.organizationId(), saved.validUntil(),
                 periodChanged ? " con la nueva modalidad " + saved.billingPeriod() : "");
         return WebhookResult.PROCESSED;
     }
 
-    private Optional<UUID> renewalOrganization(PaymentEvent event) {
-        if (event.providerSubscriptionId() == null) {
-            return Optional.empty();
-        }
-        return TenantContext.callAsSystem(() -> transactions.execute(status ->
-                subscriptions.findOrganizationByPaymentSubscriptionId(event.providerSubscriptionId())));
+    /** Registra el cobro de una renovación. La clave se deriva de su origen: el mismo cobro no se registra dos veces. */
+    private void recordRenewalPayment(Subscription subscription, String source, String chargeId, BigDecimal amount) {
+        BigDecimal charged = amount != null ? amount : plan(subscription.plan()).price(subscription.billingPeriod());
+        payments.save(Payment.paid(subscription.id(), subscription.organizationId(),
+                UUID.nameUUIDFromBytes(source.getBytes(StandardCharsets.UTF_8)), chargeId, charged, clock.instant()));
     }
 
     private WebhookResult ignore(PaymentEvent event, String why) {
         Boolean first = TenantContext.callAsSystem(() -> transactions.execute(status ->
-                processedPayments.markProcessed(event.eventId(), event.providerType())));
+                processedPayments.markProcessed(event.eventId())));
         log.debug("Evento {} ({}) ignorado: {}", event.eventId(), event.providerType(), why);
         return Boolean.TRUE.equals(first) ? WebhookResult.IGNORED : WebhookResult.DUPLICATE;
     }
@@ -290,8 +324,8 @@ public class SubscriptionCommandService {
         if (outcome == BillingPeriodChange.UNCHANGED) {
             return outcome;
         }
-        if (preview.paymentProvider() == PaymentProvider.STRIPE) {
-            gateway.scheduleBillingPeriodChange(preview.paymentSubscriptionId(), plan(preview.plan()), current, target);
+        if (gateway.provider() == PaymentProvider.STRIPE) {
+            gateway.scheduleBillingPeriodChange(preview.organizationId(), plan(preview.plan()), current, target);
         }
         return transactions.execute(status -> {
             Subscription subscription = currentSubscription();
@@ -308,7 +342,8 @@ public class SubscriptionCommandService {
     private void announce(String eventType, Subscription subscription, String reason) {
         outbox.append(subscription.organizationId(), null, eventType, SubscriptionEvents.SUBSCRIPTION,
                 subscription.id(), SubscriptionEvents.SubscriptionChanged.of(subscription,
-                        plans.findByCode(subscription.plan()).map(Plan::maxActiveWorksites).orElse(null), reason));
+                        plans.findByCode(subscription.plan()).map(Plan::maxActiveWorksites).orElse(null),
+                        gateway.provider(), reason));
     }
 
     private Subscription currentSubscription() {
@@ -325,8 +360,13 @@ public class SubscriptionCommandService {
         return new TenantInfo(organizationId, TenantContext.SYSTEM_USER_ID, IdempotentEventProcessor.SYSTEM_ROLE);
     }
 
+    /** Lo que se sabe antes de llamar a la pasarela: la suscripción y el cobro pendiente reutilizable, si hay. */
+    private record PendingCheckout(UUID subscriptionId, Payment reusable) {
+    }
+
     /** Sesión de pago lista para redirigir al cliente; {@code reused} si era una sesión abierta reciente. */
-    public record CheckoutStarted(PaymentCheckout checkout, Plan plan, boolean reused) {
+    public record CheckoutStarted(CheckoutSession session, Payment payment, Plan plan, BillingPeriod period,
+            PaymentProvider provider, boolean reused) {
     }
 
     /** Qué pasó con un webhook. */

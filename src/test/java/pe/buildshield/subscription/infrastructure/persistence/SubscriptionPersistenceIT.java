@@ -8,10 +8,9 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import pe.buildshield.subscription.application.ProcessedPaymentEvents;
 import pe.buildshield.subscription.domain.model.BillingPeriod;
-import pe.buildshield.subscription.domain.model.CheckoutStatus;
-import pe.buildshield.subscription.domain.model.PaymentCheckout;
-import pe.buildshield.subscription.domain.model.PaymentCheckoutRepository;
-import pe.buildshield.subscription.domain.model.PaymentProvider;
+import pe.buildshield.subscription.domain.model.Payment;
+import pe.buildshield.subscription.domain.model.PaymentRepository;
+import pe.buildshield.subscription.domain.model.PaymentStatus;
 import pe.buildshield.subscription.domain.model.PlanCode;
 import pe.buildshield.subscription.domain.model.PlanRepository;
 import pe.buildshield.subscription.domain.model.Subscription;
@@ -22,7 +21,9 @@ import pe.buildshield.subscription.support.SubscriptionIntegrationTest;
 import pe.buildshield.subscription.support.TestDatabase;
 
 import java.time.Duration;
+import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -41,7 +42,7 @@ class SubscriptionPersistenceIT {
     SubscriptionRepository subscriptions;
 
     @Autowired
-    PaymentCheckoutRepository checkouts;
+    PaymentRepository payments;
 
     @Autowired
     ProcessedPaymentEvents processedPayments;
@@ -100,7 +101,7 @@ class SubscriptionPersistenceIT {
         Subscription saved = TenantContext.callAs(admin(organization), () -> tx().execute(status ->
                 subscriptions.save(Subscription.startTrial(organization, now, Duration.ofDays(1)))));
         Subscription stale = Subscription.restore(saved.id(), organization, saved.plan(), null, saved.status(),
-                saved.startedAt(), saved.validUntil(), null, saved.version());
+                saved.startedAt(), saved.trialEndsAt(), null, null, saved.version());
         stale.expireIfDue(now.plus(Duration.ofDays(2)));
         TenantContext.runAs(admin(organization), () -> tx().executeWithoutResult(status -> subscriptions.save(stale)));
 
@@ -110,70 +111,95 @@ class SubscriptionPersistenceIT {
     }
 
     @Test
-    void the_paid_subscription_keeps_its_payment_details_and_is_found_by_the_gateway_subscription() {
+    void the_paid_subscription_keeps_its_plan_period_end_and_scheduled_change() {
         UUID organization = UUID.randomUUID();
         Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
         Subscription saved = TenantContext.callAs(admin(organization), () -> tx().execute(status ->
                 subscriptions.save(Subscription.startTrial(organization, now, Duration.ofDays(14)))));
-        saved.activate(PlanCode.PRO, BillingPeriod.MONTHLY, now, PaymentProvider.STRIPE, "cus_it",
-                "sub_it_" + organization);
+        assertThat(saved.startedAt()).isEqualTo(now);
+        saved.activate(PlanCode.PRO, BillingPeriod.MONTHLY, now);
         saved.scheduleBillingPeriodChange(BillingPeriod.ANNUAL, now);
         TenantContext.runAs(admin(organization), () -> tx().executeWithoutResult(status -> subscriptions.save(saved)));
 
         Optional<Subscription> current = TenantContext.callAs(admin(organization), () -> tx().execute(status ->
                 subscriptions.findCurrent()));
         Subscription reloaded = current.orElseThrow();
-        assertThat(reloaded.payment()).isEqualTo(saved.payment());
+        assertThat(reloaded.plan()).isEqualTo(PlanCode.PRO);
+        assertThat(reloaded.billingPeriod()).isEqualTo(BillingPeriod.MONTHLY);
+        assertThat(reloaded.periodEnd()).isEqualTo(saved.periodEnd());
+        assertThat(reloaded.startedAt()).isEqualTo(now);
         assertThat(reloaded.status().name()).isEqualTo("ACTIVE");
         assertThat(reloaded.pendingBillingPeriod()).isEqualTo(BillingPeriod.ANNUAL);
-        Optional<UUID> owner = TenantContext.callAsSystem(() -> tx().execute(status ->
-                subscriptions.findOrganizationByPaymentSubscriptionId("sub_it_" + organization)));
-        Optional<UUID> nobody = TenantContext.callAsSystem(() -> tx().execute(status ->
-                subscriptions.findOrganizationByPaymentSubscriptionId("sub_otra")));
-        assertThat(owner).contains(organization);
-        assertThat(nobody).isEmpty();
     }
 
     @Test
-    void checkouts_are_isolated_by_organization_and_complete_once() {
+    void a_trial_is_due_at_its_exact_time_and_a_paid_plan_on_its_utc_date() {
+        UUID trial = UUID.randomUUID();
+        UUID paid = UUID.randomUUID();
+        Instant now = Instant.parse("2026-10-08T15:00:00Z");
+        TenantContext.runAs(admin(trial), () -> tx().executeWithoutResult(status ->
+                subscriptions.save(Subscription.startTrial(trial, now, Duration.ofDays(14)))));
+        Subscription saved = TenantContext.callAs(admin(paid), () -> tx().execute(status ->
+                subscriptions.save(Subscription.startTrial(paid, now, Duration.ofDays(14)))));
+        saved.activate(PlanCode.PLUS, BillingPeriod.MONTHLY, now);
+        TenantContext.runAs(admin(paid), () -> tx().executeWithoutResult(status -> subscriptions.save(saved)));
+        Instant trialEnd = now.plus(Duration.ofDays(14));
+        Instant paidEnd = saved.periodEnd().atStartOfDay(ZoneOffset.UTC).toInstant();
+
+        assertThat(due(trialEnd.minusSeconds(1))).isEmpty();
+        assertThat(due(trialEnd)).containsExactly(trial);
+        assertThat(due(paidEnd.minusSeconds(1))).containsExactly(trial);
+        assertThat(due(paidEnd)).containsExactlyInAnyOrder(trial, paid);
+    }
+
+    private List<UUID> due(Instant now) {
+        return TenantContext.callAsSystem(() -> tx().execute(status -> subscriptions.findOrganizationsDue(now)));
+    }
+
+    @Test
+    void payments_are_isolated_by_organization_and_complete_once() {
         UUID first = UUID.randomUUID();
         UUID second = UUID.randomUUID();
-        Instant now = Instant.now();
-        PaymentCheckout opened = TenantContext.callAs(admin(first), () -> tx().execute(status -> checkouts.save(
-                PaymentCheckout.open(UUID.randomUUID(), first, "cs_it_" + first, PlanCode.PLUS, BillingPeriod.ANNUAL,
-                        PaymentProvider.SIMULATED, "http://localhost:4200/suscripcion/pago-simulado", now))));
+        UUID key = UUID.randomUUID();
+        Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        Subscription subscription = TenantContext.callAs(admin(first), () -> tx().execute(status ->
+                subscriptions.save(Subscription.startTrial(first, now, Duration.ofDays(14)))));
+        Payment opened = TenantContext.callAs(admin(first), () -> tx().execute(status -> payments.save(
+                Payment.open(subscription.id(), first, key, new BigDecimal("2990.00"), now))));
 
         assertThat(opened.id()).isNotNull();
-        Optional<PaymentCheckout> fromOther = TenantContext.callAs(admin(second), () -> tx().execute(status ->
-                checkouts.findBySessionId("cs_it_" + first)));
+        assertThat(opened.organizationId()).isEqualTo(first);
+        Optional<Payment> fromOther = TenantContext.callAs(admin(second), () -> tx().execute(status ->
+                payments.findByIdempotencyKey(key)));
         assertThat(fromOther).isEmpty();
-        List<PaymentCheckout> open = TenantContext.callAs(admin(first), () -> tx().execute(status ->
-                checkouts.findOpen()));
-        assertThat(open).extracting(PaymentCheckout::sessionId).containsExactly("cs_it_" + first);
+        List<Payment> pending = TenantContext.callAs(admin(first), () -> tx().execute(status -> payments.findPending()));
+        assertThat(pending).extracting(Payment::idempotencyKey).containsExactly(key);
 
-        opened.complete(now.plusSeconds(5));
-        PaymentCheckout completed = TenantContext.callAs(admin(first), () -> tx().execute(status ->
-                checkouts.save(opened)));
-        assertThat(completed.status()).isEqualTo(CheckoutStatus.COMPLETED);
-        assertThat(completed.version()).isEqualTo(1L);
-        List<PaymentCheckout> stillOpen = TenantContext.callAs(admin(first), () -> tx().execute(status ->
-                checkouts.findOpen()));
-        assertThat(stillOpen).isEmpty();
+        opened.complete("in_it_" + first);
+        Payment completed = TenantContext.callAs(admin(first), () -> tx().execute(status -> payments.save(opened)));
+        assertThat(completed.status()).isEqualTo(PaymentStatus.PAID);
+        assertThat(completed.gatewayChargeId()).isEqualTo("in_it_" + first);
+        List<Payment> stillPending = TenantContext.callAs(admin(first), () -> tx().execute(status ->
+                payments.findPending()));
+        assertThat(stillPending).isEmpty();
         assertThatThrownBy(() -> TenantContext.runAs(admin(first), () -> tx().executeWithoutResult(status ->
-                checkouts.save(opened)))).isInstanceOf(org.springframework.dao.OptimisticLockingFailureException.class);
+                payments.save(Payment.open(subscription.id(), first, key, BigDecimal.ONE, now)))))
+                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
     }
 
     @Test
-    void a_gateway_event_is_recorded_only_once() {
+    void a_gateway_event_is_recorded_only_once_in_processed_events() {
         Boolean first = TenantContext.callAsSystem(() -> tx().execute(status ->
-                processedPayments.markProcessed("evt_it_1", "invoice.paid")));
+                processedPayments.markProcessed("evt_it_1")));
         Boolean repeated = TenantContext.callAsSystem(() -> tx().execute(status ->
-                processedPayments.markProcessed("evt_it_1", "invoice.paid")));
-        Boolean withoutType = TenantContext.callAsSystem(() -> tx().execute(status ->
-                processedPayments.markProcessed("evt_it_2", null)));
+                processedPayments.markProcessed("evt_it_1")));
+        Boolean another = TenantContext.callAsSystem(() -> tx().execute(status ->
+                processedPayments.markProcessed("evt_it_2")));
         assertThat(first).isTrue();
         assertThat(repeated).isFalse();
-        assertThat(withoutType).isTrue();
+        assertThat(another).isTrue();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM processed_events WHERE consumer = 'StripeWebhooks'",
+                Long.class)).isEqualTo(2);
     }
 
     private TransactionTemplate tx() {

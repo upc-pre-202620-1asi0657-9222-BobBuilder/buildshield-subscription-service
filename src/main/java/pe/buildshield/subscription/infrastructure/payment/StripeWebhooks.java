@@ -8,8 +8,11 @@ import org.springframework.stereotype.Component;
 import pe.buildshield.subscription.application.InvalidPaymentWebhookException;
 import pe.buildshield.subscription.application.PaymentEvent;
 import pe.buildshield.subscription.application.PaymentWebhooks;
-import pe.buildshield.subscription.domain.model.PaymentCheckout;
+import pe.buildshield.subscription.application.SimulatedSession;
+import pe.buildshield.subscription.domain.model.BillingPeriod;
+import pe.buildshield.subscription.domain.model.PlanCode;
 
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.UUID;
@@ -20,10 +23,11 @@ import java.util.UUID;
  * <ul>
  *   <li>{@code checkout.session.completed} con {@code payment_status = paid} (o
  *       {@code checkout.session.async_payment_succeeded}): pago de la sesión, activa la suscripción. La organización
- *       viaja en {@code client_reference_id}.</li>
- *   <li>{@code invoice.paid} con {@code billing_reason = subscription_cycle}: cobro de la renovación. La suscripción de
- *       Stripe viene en {@code subscription} o, en versiones nuevas de la API, en
- *       {@code parent.subscription_details.subscription}.</li>
+ *       viaja en {@code client_reference_id}; el plan, la modalidad y la clave del cobro, en los metadatos que puso
+ *       este servicio al abrir la sesión (la firma garantiza que no se alteraron).</li>
+ *   <li>{@code invoice.paid} con {@code billing_reason = subscription_cycle}: cobro de la renovación. La organización
+ *       viene en los metadatos de la suscripción, copiados en {@code subscription_details.metadata} o, en versiones
+ *       nuevas de la API, en {@code parent.subscription_details.metadata}.</li>
  *   <li>Cualquier otro: se ignora.</li>
  * </ul>
  */
@@ -73,8 +77,11 @@ class StripeWebhooks implements PaymentWebhooks {
         if (reference == null) {
             reference = text(session.path("metadata"), "organizationId");
         }
-        return new PaymentEvent(eventId, type, PaymentEvent.Type.CHECKOUT_COMPLETED, text(session, "id"),
-                uuid(reference), id(session, "customer"), id(session, "subscription"));
+        JsonNode metadata = session.path("metadata");
+        return PaymentEvent.checkoutCompleted(eventId, type, text(session, "id"), uuid(reference),
+                enumValue(PlanCode.class, text(metadata, "plan")),
+                enumValue(BillingPeriod.class, text(metadata, "billingPeriod")), uuid(text(metadata, "paymentKey")),
+                id(session, "invoice"));
     }
 
     private PaymentEvent invoice(String eventId, String type, JsonNode invoice) {
@@ -82,33 +89,34 @@ class StripeWebhooks implements PaymentWebhooks {
             // El primer cobro (subscription_create) ya activó la suscripción con checkout.session.completed.
             return ignored(eventId, type);
         }
-        String subscription = id(invoice, "subscription");
-        if (subscription == null) {
-            subscription = text(invoice.path("parent").path("subscription_details"), "subscription");
+        String organization = text(invoice.path("subscription_details").path("metadata"), "organizationId");
+        if (organization == null) {
+            organization = text(invoice.path("parent").path("subscription_details").path("metadata"), "organizationId");
         }
-        return new PaymentEvent(eventId, type, PaymentEvent.Type.RENEWAL_PAID, null, null, id(invoice, "customer"),
-                subscription);
+        JsonNode amountPaid = invoice.path("amount_paid");
+        BigDecimal amount = amountPaid.isIntegralNumber() ? amountPaid.decimalValue().movePointLeft(2) : null;
+        return PaymentEvent.renewalPaid(eventId, type, uuid(organization), text(invoice, "id"), amount);
     }
 
     private static PaymentEvent ignored(String eventId, String type) {
-        return new PaymentEvent(eventId, type, PaymentEvent.Type.IGNORED, null, null, null, null);
+        return PaymentEvent.ignored(eventId, type);
     }
 
     @Override
-    public SignedWebhook simulateCheckoutCompleted(PaymentCheckout checkout, Instant paidAt) {
-        String suffix = checkout.idempotencyKey().toString().replace("-", "");
+    public SignedWebhook simulateCheckoutCompleted(SimulatedSession simulated, UUID organizationId, Instant paidAt) {
+        String suffix = simulated.paymentKey().toString().replace("-", "");
         ObjectNode session = json.createObjectNode()
-                .put("id", checkout.sessionId())
+                .put("id", simulated.value())
                 .put("object", "checkout.session")
                 .put("mode", "subscription")
                 .put("payment_status", "paid")
-                .put("client_reference_id", checkout.organizationId().toString())
-                .put("customer", "cus_sim_" + suffix)
-                .put("subscription", "sub_sim_" + suffix);
+                .put("client_reference_id", organizationId.toString())
+                .put("invoice", "in_sim_" + suffix);
         session.putObject("metadata")
-                .put("organizationId", checkout.organizationId().toString())
-                .put("plan", checkout.plan().name())
-                .put("billingPeriod", checkout.billingPeriod().name());
+                .put("organizationId", organizationId.toString())
+                .put("plan", simulated.plan().name())
+                .put("billingPeriod", simulated.period().name())
+                .put("paymentKey", simulated.paymentKey().toString());
         ObjectNode event = json.createObjectNode()
                 .put("id", "evt_sim_" + UUID.randomUUID().toString().replace("-", ""))
                 .put("object", "event")
@@ -139,6 +147,14 @@ class StripeWebhooks implements PaymentWebhooks {
     private static String id(JsonNode node, String field) {
         JsonNode value = node.path(field);
         return value.isObject() ? text(value, "id") : text(node, field);
+    }
+
+    private static <E extends Enum<E>> E enumValue(Class<E> type, String value) {
+        try {
+            return value == null ? null : Enum.valueOf(type, value);
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
     }
 
     private static UUID uuid(String value) {

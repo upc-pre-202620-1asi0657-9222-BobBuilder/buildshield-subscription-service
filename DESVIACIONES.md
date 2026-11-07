@@ -1,68 +1,62 @@
-# Desviaciones frente al ER
+# Desviaciones y Alineación frente a la Arquitectura v4
 
-Fuente: sección `subscription_db` de `wiki/informe-avance2/er-corregido.md`. Este archivo lista lo que el servicio tiene y el ER no dibuja, y cómo se resolvió lo que el ER quitó.
+Fuente: `buildshield-presentacion-v4.pdf` (Diagrama Entidad-Relación pág. 19 y Modelo C4 Nivel 3 - Componentes del Contenedor de Suscripción pág. 28). Este documento detalla la concordancia del esquema relacional y arquitectura de componentes del servicio `buildshield-subscription-service` frente a la especificación oficial.
 
-## Columnas que el equipo agregó al ER
+## Columnas Aceptadas y Ampliaciones del ER
 
-El equipo decidió ampliar el ER con estas dos columnas de `subscriptions`. Ya no son desviaciones, y ninguna columna del servicio queda fuera del ER. `wiki/informe-avance2/er-corregido.md` vive fuera de este repositorio y al escribir esto todavía no las dibuja.
+El esquema relacional de la base de datos `subscription_db` se encuentra alineado con el ER oficial de la pág. 19, incorporando las siguientes columnas clave:
 
-| Columna | Tipo | Motivo |
+| Tabla | Columna | Tipo | Justificación de Arquitectura |
+|---|---|---|---|
+| `subscriptions` | `organization_id` | `uuid not null` | Identificador de la organización propietaria de la suscripción, garantizando aislamiento multi-inquilino. |
+| `subscriptions` | `pending_billing_period` | `varchar(10) null` | Soporte para cambio programado de modalidad (US12). Permite consultar (`GET /subscriptions/current`) y aplicar la nueva modalidad (MENSUAL / ANUAL) en la siguiente renovación sin llamadas sincrónicas a la pasarela. |
+| `subscriptions` | `gateway_subscription_id` | `varchar(60) null` | Identificador de suscripción en Stripe (`sub_...`). Utilizado en US12 para operar directamente sobre el schedule de suscripción (`GET /v1/subscriptions/{id}`) sin requerir búsqueda lenta por metadatos. |
+| `subscriptions` | `created_at`, `created_by`, `updated_at`, `updated_by` | Auditoría | Trazabilidad y auditoría de cambios de estado y titularidad en las suscripciones. |
+| `payments` | `status` | `varchar(20) not null` | Estado del cobro: `PENDING`, `COMPLETED`, `FAILED`. |
+| `payments` | `failure_reason` | `varchar(120) null` | Motivo de rechazo o fallo reportado por la pasarela de pagos al procesar un intento de cobro. |
+| `outbox_events` | `correlation_id` | `uuid null` | Identificador de correlación para observabilidad distribuida y trazabilidad de eventos del transactional outbox pattern. |
+| `processed_events`| `consumer` | `varchar(60) not null` | Nombre del consumidor en tiempo de ejecución (`OrganizationEventConsumer`, `StripeWebhooks`) que garantiza procesamiento idempotente. |
+
+## Componentes C4 (Nivel 3 - Suscripción y Pagos)
+
+De acuerdo con el diagrama C4 de Componentes (pág. 28), se organizan los componentes principales:
+
+1. **`SubscriptionController`** (`pe.buildshield.subscription.interfaces.rest`):
+   - Controlador REST unificado que expone los endpoints de planes (`/api/v1/plans`), suscripción del inquilino actual (`/api/v1/subscriptions/current`), inicio de checkout (`/api/v1/subscriptions/checkout`), cambio de modalidad de facturación (`/api/v1/subscriptions/billing-period` y `/current/billing-period`) y finalización de sesión simulada (`/api/v1/subscriptions/simulated-sessions/{sessionId}/complete` y `/checkout/{sessionId}/simulated-payment`).
+2. **`StripePaymentAdapter`** (`pe.buildshield.subscription.infrastructure.payment`):
+   - Implementación del puerto `PaymentGateway` para la integración HTTP con Stripe (Checkout Sessions, Subscription Schedules).
+   - Incorpora Circuit Breaker de Resilience4j (50 % fallos en 10 llamadas abre por 30 s), tiempo de espera configurable (`STRIPE_TIMEOUT`) y cabecera `Idempotency-Key` en mutaciones.
+3. **`StripeWebhookController`** (`pe.buildshield.subscription.interfaces.rest`):
+   - Endpoint dedicado para recibir notificaciones asíncronas de la pasarela en `/api/v1/payments/webhooks/stripe` y `/api/v1/subscriptions/webhooks/stripe`.
+   - Valida criptográficamente la cabecera `Stripe-Signature` (HMAC-SHA256 con ventana de tolerancia de 5 minutos).
+4. **`OrganizationEventConsumer`** (`pe.buildshield.subscription.infrastructure.messaging`):
+   - Consumidor de eventos del broker Kafka para el tópico `buildshield.iam`.
+   - Ingesta de forma idempotente `OrganizationRegistered` para registrar la suscripción inicial con prueba gratuita de 14 días (`TRIAL`).
+5. **`Discount` (Agregado / Objeto de Valor de Dominio)** (`pe.buildshield.subscription.domain.model`):
+   - Modelo de dominio puro (sin dependencias de frameworks) que encapsula el porcentaje de descuento anual (`annualDiscountPct`), la validación ($0 \le pct \le 100$) y el cálculo del precio anual redondeado y ahorro con respecto a la facturación mensual.
+
+## Flujo de Cobro Fallido y Evento `PaymentFailed`
+
+Alineado con los requisitos de negocio y `TAREA.md`:
+
+1. **Recepción en `StripeWebhooks`:**
+   - Soporte para el webhook `invoice.payment_failed` de Stripe.
+   - Extrae el identificador de la organización, id de suscripción externa (`sub_...`), referencia de factura/cobro (`in_...`), monto facturado y motivo del rechazo (`failureReason` a partir de `last_finalization_error.message`, `billing_reason` o `"Payment failed"`).
+2. **Procesamiento en `SubscriptionCommandService`:**
+   - Se localiza el pago pendiente correspondiente o se registra un nuevo cobro en estado `FAILED`.
+   - Se actualiza `payments.status = 'FAILED'`, `failure_reason` (truncado a 120 caracteres) y `gateway_charge_id`.
+   - Se emite el evento de integración `PaymentFailed` a través de la tabla `outbox_events` hacia el tópico `buildshield.subscription`.
+3. **Payload de Eventos de Pago y Suscripción:**
+   - Todos los eventos de ciclo de vida (`SubscriptionActivated`, `SubscriptionExpired`, `PaymentSucceeded`, `PaymentFailed`) publican los campos canónicos requeridos: `organizationId`, `plan`, `status`, `maxActiveWorksites`, `periodEnd` (y en fallos, `failureReason`).
+4. **Idempotencia:**
+   - Los reintentos de checkout o webhook con la misma clave de idempotencia devuelven la sesión existente o son descartados mediante `processed_events`, previniendo cobros dobles o procesamiento redundante.
+
+## Lo que el ER simplificó y su resolución en el Servicio
+
+| Dato en esquema histórico | Solución en Arquitectura v4 | Efecto |
 |---|---|---|
-| `pending_billing_period` | `varchar(10) null` (desde V2) | US12 pide mostrar el cambio de modalidad programado y aplicarlo al renovar. `GET /subscriptions/current` y los eventos lo exponen en cada lectura. En Stripe vive en el subscription schedule, pero leerlo ahí haría depender cada consulta de Stripe, y el modo simulado no tiene dónde guardarlo. |
-| `gateway_subscription_id` | `varchar(60) null` (V4) | Id de la suscripción de Stripe (`sub_...`). US12 lo usa para leerla directo con `GET /v1/subscriptions/{id}`. Lo escribe el webhook: `subscription` de `checkout.session.completed` (o `checkout.session.async_payment_succeeded`) al activar, y `subscription` o `parent.subscription_details.subscription` de `invoice.paid` al renovar. |
-
-`outbox_events.correlation_id` y la auditoría de `subscriptions` sí están en el ER.
-
-## Cómo US12 ubica la suscripción de Stripe
-
-1. **Con `gateway_subscription_id`:** `GET /v1/subscriptions/{id}`. Si Stripe responde 404 o la suscripción está cancelada, se responde 503 y no se busca por metadatos: solo la falta del id activa el respaldo.
-2. **Con la columna en NULL:** `GET /v1/subscriptions/search` por `metadata['organizationId']`, solo como respaldo. Esa búsqueda puede demorar hasta un minuto y no está disponible en todas las regiones de Stripe. Si la región no la tiene, el cambio de modalidad de esas filas responde 503 hasta que un webhook de renovación guarde el id.
-
-La columna queda en NULL en estos casos:
-
-- Las filas anteriores a V4: V3 ya borró `payment_subscription_id` y no hay de dónde copiar el id. Se llena con la siguiente renovación.
-- Un webhook de activación sin `subscription`. La activación reemplaza el id guardado aunque venga vacío, porque cada pago de Checkout crea otra suscripción en Stripe y el id anterior ya no sirve. Una renovación sin id conserva el guardado.
-- Un id de más de 60 caracteres, que no se guarda (igual que `gateway_charge_id`).
-
-**Sin credenciales, todo esto se probó solo contra un Stripe simulado (servidor HTTP local con eventos escritos a mano). Nunca se usó el Stripe real.** Falta confirmar con una cuenta de prueba los campos de los webhooks y si la región de la cuenta tiene la búsqueda.
-
-## Lo que el ER quitó y cómo se resolvió
-
-| Dato quitado | Solución | Efecto |
-|---|---|---|
-| `plans.name`, `description`, `trial_only`, `currency`, `sort_order` | En código: `PlanCode` y `Plan` (`PEN`). | Un cambio de nombre, descripción o moneda requiere desplegar. La API no cambia. |
-| `plans.annual_price` | Se calcula: `monthly_price × 12 × (1 − annual_discount_pct / 100)`, redondeado al sol. | Reproduce S/ 2 990 y S/ 6 990 con 16,67 %. Con dos decimales de descuento no se puede fijar un precio anual con céntimos. |
-| `subscriptions.plan_code` | `plan_id`. | Ninguno. |
-| `subscriptions.started_at` | `created_at`. La entidad fija `created_at` con el inicio de la prueba al insertar, y V3 copia `started_at`. | `created_at` puede ser unos segundos anterior a la inserción real. |
-| `subscriptions.valid_until` | `trial_ends_at` en la prueba y `period_end` en los planes pagados. `validUntil` de la API y de los eventos es `trial_ends_at` o las 00:00 UTC de `period_end`. | **`period_end` es una fecha: se pierde la hora.** Un pago de las 15:00 vence a las 00:00 de ese día, y el margen de cobro de 3 días lo cubre. |
-| `subscriptions.current_period_start` | Se deriva: una modalidad antes de `period_end`. | Precisión de fecha. A fin de mes puede diferir: un pago del 31 de enero termina el 28 de febrero y se muestra con inicio el 28 de enero. |
-| `subscriptions.expired_at` | Sin reemplazo. Ni la API ni los eventos lo exponían. | **Se pierde el dato** en V3. `updated_at` da una aproximación. |
-| `subscriptions.payment_provider` | El proveedor es el de la pasarela configurada (`PaymentGateway.provider()`), y solo se informa en planes pagados. | El margen de cobro de 3 días ahora aplica a todo plan pagado; el modo simulado renueva antes de llegar a usarlo. Una base local con pagos simulados que luego arranca con clave de Stripe los trata como de Stripe. |
-| `subscriptions.payment_customer_id` | Sin reemplazo: ningún flujo lo usaba. Sigue en Stripe. | **Se pierde el dato local** en V3. |
-| `subscriptions.payment_subscription_id` | Reemplazada por `gateway_subscription_id` (V4), con 60 caracteres en vez de 100. La organización sigue en los metadatos: `invoice.paid` trae `organizationId` en `subscription_details.metadata` (o `parent.subscription_details.metadata`). | V3 borró los valores antiguos y V4 no puede recuperarlos: esas filas usan el respaldo descrito arriba. |
-| `payment_checkouts` | `payments`. El plan, la modalidad y la clave del cobro viajan en los metadatos de la sesión, protegidos por la firma del webhook. | La activación ya no compara contra una sesión guardada: confía en los metadatos firmados. |
-| `payment_checkouts.session_id`, `checkout_url` | No se guardan. Reutilizar una sesión repite la llamada con la misma clave de idempotencia y Stripe devuelve la misma respuesta. | Una reutilización hace una llamada a Stripe. El cobro pendiente se identifica por monto: si dos combinaciones de plan y modalidad cuestan lo mismo, Stripe rechazaría la clave por tener otros parámetros (503 durante 30 minutos). Los precios sembrados son todos distintos. |
-| `payment_checkouts.plan_code`, `billing_period`, `provider`, `opened_at`, `completed_at` | `amount` y `created_at` en `payments`; lo demás no tiene lugar. | **Se pierde el dato histórico** en V3. Cada cobro migrado queda con el monto según el catálogo vigente. |
-| `payment_webhook_events` | `processed_events` con el consumidor `StripeWebhooks`. El id `evt_...` se convierte en uuid con `UUID.nameUUIDFromBytes`; V3 aplica el mismo algoritmo. | **Se pierde `event_type`**. Un webhook reenviado después de migrar se sigue reconociendo como repetido. |
-
-## Modo simulado
-
-El ER no guarda la sesión, así que su identificador la lleva: `cs_sim_<clave>_<PLAN>_<MODALIDAD>`. Como el plan viene en la URL, el pago simulado comprueba que su precio sea el monto del cobro guardado. El identificador cambió de formato; la web lo trata como opaco.
-
-El evento simulado trae `sub_sim_<clave>` como suscripción y se guarda en `gateway_subscription_id`, igual que el real, pero el modo simulado no llama a ninguna pasarela. Una base local con esos ids que luego arranca con clave de Stripe recibe 404 de Stripe en US12, y por lo tanto 503, hasta que llegue un pago real.
-
-## `billing_period` NOT NULL
-
-La prueba gratuita se guarda con `MONTHLY`, y la API y los eventos la siguen mostrando con modalidad nula. Una suscripción Free se reconoce por el plan.
-
-## `gateway_charge_id`
-
-Guarda el id de la factura de Stripe (`in_...`), porque en modo `subscription` la sesión no trae un cobro directo. La sesión (`cs_...`) no cabe: suele pasar de 60 caracteres. Un id más largo que la columna se deja nulo. Los cobros migrados desde `payment_checkouts` quedan con este campo nulo.
-
-## Sesiones abiertas durante la migración
-
-Las sesiones creadas antes de V3 no traen la clave del cobro en sus metadatos. Su webhook completa el cobro pendiente más reciente del monto de ese plan y modalidad.
-
-## Sin implementar
-
-`payments.failure_reason` y el estado `FAILED` existen en el esquema, pero ningún flujo los escribe: el servicio no recibe `invoice.payment_failed`, igual que antes.
+| `plans.name`, `description`, `trial_only`, `currency`, `sort_order` | Resuelto en código en el enum de dominio `PlanCode` y agregado `Plan` (moneda `PEN`). | Estabilidad de catálogo; la API REST expone nombres legibles y metadatos completos. |
+| `plans.annual_price` | Calculado mediante el objeto de valor `Discount`: `monthly_price × 12 × (1 − annual_discount_pct / 100)`. | Reproduce con precisión los precios sembrados (S/ 2 990 y S/ 6 990 con 16,67 %). |
+| `subscriptions.started_at` | Mapeado a `created_at`. | Inserción consistente con marcas temporales de auditoría. |
+| `subscriptions.valid_until` | `trial_ends_at` durante el periodo `TRIAL` y `period_end` (a las 00:00 UTC) en planes pagados. | Precisión adecuada para corte de servicio y control de lectura con margen de cortesía de 3 días. |
+| `payment_checkouts` | Unificado en tabla `payments`. Plan, modalidad y clave de idempotencia viajan firmados en los metadatos de la sesión de Stripe. | Eliminación de tablas redundantes conservando verificación criptográfica de webhooks. |

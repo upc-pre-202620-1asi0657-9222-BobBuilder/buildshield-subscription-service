@@ -35,7 +35,9 @@ class PlanTest {
                 .isInstanceOf(NullPointerException.class);
         assertThatThrownBy(() -> new Plan(PlanCode.PRO, null, null, BigDecimal.ONE))
                 .isInstanceOf(NullPointerException.class);
-        assertThatThrownBy(() -> new Plan(PlanCode.PRO, null, BigDecimal.ONE, null))
+        assertThatThrownBy(() -> new Plan(PlanCode.PRO, null, BigDecimal.ONE, (BigDecimal) null))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new Plan(PlanCode.PRO, null, BigDecimal.ONE, (Discount) null))
                 .isInstanceOf(NullPointerException.class);
     }
 
@@ -72,6 +74,16 @@ class PlanTest {
         assertThatThrownBy(free::requirePayable)
                 .isInstanceOf(pe.buildshield.subscription.shared.error.ValidationException.class)
                 .hasFieldOrPropertyWithValue("code", "PLAN_NOT_PAYABLE");
+    }
+
+    @Test
+    void plan_can_be_created_with_discount_value_object() {
+        Discount discount = Discount.of(new BigDecimal("20.00"));
+        Plan plan = new Plan(PlanCode.PLUS, 5, new BigDecimal("100.00"), discount);
+        assertThat(plan.discount()).isEqualTo(discount);
+        assertThat(plan.annualDiscountPct()).isEqualByComparingTo("20.00");
+        assertThat(plan.annualPrice()).isEqualByComparingTo("960.00");
+        assertThat(plan.annualSavings()).isEqualByComparingTo("240.00");
     }
 
     @Test

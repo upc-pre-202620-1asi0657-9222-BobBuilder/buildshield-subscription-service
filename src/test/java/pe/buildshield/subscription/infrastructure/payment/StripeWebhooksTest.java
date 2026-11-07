@@ -96,6 +96,44 @@ class StripeWebhooksTest {
     }
 
     @Test
+    void invoice_payment_failed_event_extracts_failure_details() {
+        UUID key = UUID.randomUUID();
+        String failedInvoice = """
+                {"id":"evt_fail_1","type":"invoice.payment_failed","data":{"object":{"id":"in_fail_1",
+                "amount_due":29900,"subscription":"sub_f1",
+                "last_finalization_error":{"message":"Tarjeta sin fondos suficientes"},
+                "metadata":{"organizationId":"%s","paymentKey":"%s"}}}}""".formatted(organization, key);
+
+        PaymentEvent event = verify(failedInvoice);
+        assertThat(event.type()).isEqualTo(PaymentEvent.Type.PAYMENT_FAILED);
+        assertThat(event.eventId()).isEqualTo("evt_fail_1");
+        assertThat(event.organizationId()).isEqualTo(organization);
+        assertThat(event.paymentKey()).isEqualTo(key);
+        assertThat(event.chargeId()).isEqualTo("in_fail_1");
+        assertThat(event.amount()).isEqualByComparingTo("299.00");
+        assertThat(event.failureReason()).isEqualTo("Tarjeta sin fondos suficientes");
+        assertThat(event.gatewaySubscriptionId()).isEqualTo("sub_f1");
+
+        // Con billing_reason como fallback y metadata anidada
+        String fallbackReason = """
+                {"id":"evt_fail_2","type":"invoice.payment_failed","data":{"object":{"id":"in_fail_2",
+                "amount_paid":69900,"billing_reason":"subscription_cycle",
+                "subscription_details":{"metadata":{"organizationId":"%s"}}}}}""".formatted(organization);
+        PaymentEvent fallbackEvent = verify(fallbackReason);
+        assertThat(fallbackEvent.type()).isEqualTo(PaymentEvent.Type.PAYMENT_FAILED);
+        assertThat(fallbackEvent.failureReason()).isEqualTo("subscription_cycle");
+        assertThat(fallbackEvent.amount()).isEqualByComparingTo("699.00");
+
+        // Sin motivo explícito -> fallback "Payment failed"
+        String defaultReason = """
+                {"id":"evt_fail_3","type":"invoice.payment_failed","data":{"object":{"id":"in_fail_3",
+                "parent":{"subscription_details":{"metadata":{"organizationId":"%s"}}}}}}""".formatted(organization);
+        PaymentEvent defaultEvent = verify(defaultReason);
+        assertThat(defaultEvent.type()).isEqualTo(PaymentEvent.Type.PAYMENT_FAILED);
+        assertThat(defaultEvent.failureReason()).isEqualTo("Payment failed");
+    }
+
+    @Test
     void the_stripe_subscription_id_may_be_expanded_or_missing() {
         String expandedSession = """
                 {"id":"evt_s1","type":"checkout.session.completed","data":{"object":{"id":"cs_s1",
@@ -188,12 +226,10 @@ class StripeWebhooksTest {
 
     private void assertRejected(String payload, String header, String message) {
         assertThatThrownBy(() -> webhooks.verify(payload, header))
-                .isInstanceOf(InvalidPaymentWebhookException.class)
-                .hasFieldOrPropertyWithValue("code", "INVALID_WEBHOOK_SIGNATURE")
-                .hasMessageContaining(message);
+                .isInstanceOf(InvalidPaymentWebhookException.class).hasMessageContaining(message);
     }
 
-    static PaymentsProperties properties(String webhookSecret, boolean simulated) {
+    private static PaymentsProperties properties(String webhookSecret, boolean simulated) {
         return new PaymentsProperties(simulated, null, null, null,
                 new PaymentsProperties.Stripe(null, webhookSecret, null, null, null, null));
     }

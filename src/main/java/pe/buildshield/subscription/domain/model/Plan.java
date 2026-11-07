@@ -3,7 +3,6 @@ package pe.buildshield.subscription.domain.model;
 import pe.buildshield.subscription.shared.error.ValidationException;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.Objects;
 
 /**
@@ -11,21 +10,23 @@ import java.util.Objects;
  * El ER guarda el precio mensual y el descuento anual: el nombre, la descripción y la moneda salen del código.
  *
  * @param maxActiveWorksites nulo = obras ilimitadas
- * @param annualDiscountPct  descuento del pago anual frente a doce pagos mensuales, en porcentaje
+ * @param discount           descuento del pago anual frente a doce pagos mensuales (objeto de valor)
  */
-public record Plan(PlanCode code, Integer maxActiveWorksites, BigDecimal monthlyPrice, BigDecimal annualDiscountPct) {
+public record Plan(PlanCode code, Integer maxActiveWorksites, BigDecimal monthlyPrice, Discount discount) {
 
     public static final String PLAN_NOT_PAYABLE = "PLAN_NOT_PAYABLE";
 
     /** Todos los precios están en soles. */
     public static final String CURRENCY = "PEN";
 
-    private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
-
     public Plan {
         Objects.requireNonNull(code, "code");
         Objects.requireNonNull(monthlyPrice, "monthlyPrice");
-        Objects.requireNonNull(annualDiscountPct, "annualDiscountPct");
+        Objects.requireNonNull(discount, "discount");
+    }
+
+    public Plan(PlanCode code, Integer maxActiveWorksites, BigDecimal monthlyPrice, BigDecimal annualDiscountPct) {
+        this(code, maxActiveWorksites, monthlyPrice, Discount.of(annualDiscountPct));
     }
 
     public String name() {
@@ -59,18 +60,22 @@ public record Plan(PlanCode code, Integer maxActiveWorksites, BigDecimal monthly
      * aproximado (S/ 299 al 16,67 % da 2 989,88) y el precio publicado es entero (S/ 2 990).
      */
     public BigDecimal annualPrice() {
-        return twelveMonthsPrice().multiply(HUNDRED.subtract(annualDiscountPct))
-                .divide(HUNDRED, 0, RoundingMode.HALF_UP).setScale(2);
+        return discount.calculateAnnualPrice(monthlyPrice);
     }
 
     /** Ahorro del pago anual frente a doce pagos mensuales (nunca negativo). */
     public BigDecimal annualSavings() {
-        return twelveMonthsPrice().subtract(annualPrice()).max(BigDecimal.ZERO);
+        return discount.calculateSavings(monthlyPrice);
     }
 
     /** Descuento del pago anual frente a doce pagos mensuales, en porcentaje con dos decimales. */
     public BigDecimal annualDiscountPercent() {
-        return annualDiscountPct.setScale(2, RoundingMode.HALF_UP);
+        return discount.percent();
+    }
+
+    /** Porcentaje de descuento anual directo. */
+    public BigDecimal annualDiscountPct() {
+        return discount.percentage();
     }
 
     /** Precio de un periodo de cobro en esa modalidad. */

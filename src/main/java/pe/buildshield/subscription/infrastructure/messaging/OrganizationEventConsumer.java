@@ -10,21 +10,22 @@ import pe.buildshield.subscription.shared.messaging.EventEnvelope;
 import pe.buildshield.subscription.shared.messaging.IdempotentEventProcessor;
 
 /**
- * Consume {@code buildshield.iam}: {@code OrganizationRegistered} inicia la prueba gratuita de la organización
- * (US08). Cada evento se procesa una sola vez; los demás tipos se ignoran.
+ * Consume {@code buildshield.iam} (TAREA.md línea 76): {@code OrganizationRegistered} inicia la prueba gratuita
+ * de la organización (US08). Cada evento se procesa una sola vez con clave de idempotencia {@code OrganizationEventConsumer}
+ * en {@code processed_events}; los demás tipos se ignoran.
  */
 @Component
-public class IamEventConsumer {
+public class OrganizationEventConsumer {
 
     static final String ORGANIZATION_REGISTERED = "OrganizationRegistered";
-    static final String CONSUMER = "IamEventConsumer";
+    static final String CONSUMER = "OrganizationEventConsumer";
 
-    private static final Logger log = LoggerFactory.getLogger(IamEventConsumer.class);
+    private static final Logger log = LoggerFactory.getLogger(OrganizationEventConsumer.class);
 
     private final IdempotentEventProcessor processor;
     private final SubscriptionCommandService commands;
 
-    public IamEventConsumer(IdempotentEventProcessor processor, SubscriptionCommandService commands) {
+    public OrganizationEventConsumer(IdempotentEventProcessor processor, SubscriptionCommandService commands) {
         this.processor = processor;
         this.commands = commands;
     }

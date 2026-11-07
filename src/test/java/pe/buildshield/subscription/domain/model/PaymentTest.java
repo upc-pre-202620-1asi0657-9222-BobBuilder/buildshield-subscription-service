@@ -40,6 +40,34 @@ class PaymentTest {
     }
 
     @Test
+    void a_pending_payment_fails_and_records_reason() {
+        UUID key = UUID.randomUUID();
+        Payment payment = Payment.open(SUBSCRIPTION, ORGANIZATION, key, AMOUNT, NOW);
+
+        assertThat(payment.fail("Tarjeta rechazada: fondos insuficientes", "in_fail_1")).isTrue();
+        assertThat(payment.status()).isEqualTo(PaymentStatus.FAILED);
+        assertThat(payment.failureReason()).isEqualTo("Tarjeta rechazada: fondos insuficientes");
+        assertThat(payment.gatewayChargeId()).isEqualTo("in_fail_1");
+
+        // No se puede volver a fallar ni a completar
+        assertThat(payment.fail("Otro motivo", "in_fail_2")).isFalse();
+        assertThat(payment.complete("in_ok")).isFalse();
+        assertThat(payment.failureReason()).isEqualTo("Tarjeta rechazada: fondos insuficientes");
+    }
+
+    @Test
+    void a_failed_payment_can_be_created_directly_and_normalizes_reason_length() {
+        UUID key = UUID.randomUUID();
+        String longReason = "Error: ".repeat(30); // > 120 chars
+        Payment payment = Payment.failed(SUBSCRIPTION, ORGANIZATION, key, "in_f99", AMOUNT, longReason, NOW);
+
+        assertThat(payment.status()).isEqualTo(PaymentStatus.FAILED);
+        assertThat(payment.gatewayChargeId()).isEqualTo("in_f99");
+        assertThat(payment.failureReason()).hasSize(120);
+        assertThat(payment.failureReason()).isEqualTo(longReason.substring(0, 120));
+    }
+
+    @Test
     void a_recent_pending_payment_of_the_same_amount_is_reused() {
         Payment payment = Payment.restore(UUID.randomUUID(), SUBSCRIPTION, ORGANIZATION, UUID.randomUUID(), null,
                 new BigDecimal("699.00"), PaymentStatus.PENDING, null, NOW);

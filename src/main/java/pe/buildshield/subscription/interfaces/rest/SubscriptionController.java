@@ -2,6 +2,7 @@ package pe.buildshield.subscription.interfaces.rest;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.ArraySchema;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.ExampleObject;
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -18,7 +19,6 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import pe.buildshield.subscription.application.SubscriptionCommandService;
 import pe.buildshield.subscription.application.SubscriptionCommandService.CheckoutStarted;
@@ -27,32 +27,51 @@ import pe.buildshield.subscription.application.SubscriptionQueryService.Subscrip
 import pe.buildshield.subscription.domain.model.BillingPeriod;
 import pe.buildshield.subscription.domain.model.CheckoutStatus;
 import pe.buildshield.subscription.domain.model.PaymentProvider;
+import pe.buildshield.subscription.domain.model.Plan;
 import pe.buildshield.subscription.domain.model.PlanCode;
 import pe.buildshield.subscription.domain.model.Subscription.BillingPeriodChange;
 import pe.buildshield.subscription.domain.model.SubscriptionStatus;
 import pe.buildshield.subscription.shared.error.ErrorResponse;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
+/**
+ * Controlador C4 unificado para catálogo de planes, suscripción y pagos (C4 pág. 28).
+ * Cubre US07, US08, US09, US11 y US12.
+ */
 @RestController
-@RequestMapping("/api/v1/subscriptions")
-@Tag(name = "Suscripciones", description = "US07, US09, US11 y US12: suscripción de la organización, pago con Stripe "
-        + "Checkout y cambio de modalidad")
-@SecurityRequirement(name = "bearer")
-class SubscriptionsController {
+@Tag(name = "Suscripciones", description = "US07, US08, US09, US11 y US12: catálogo de planes, suscripción de la organización, pago con Stripe Checkout y cambio de modalidad")
+class SubscriptionController {
 
     private final SubscriptionQueryService queries;
     private final SubscriptionCommandService commands;
 
-    SubscriptionsController(SubscriptionQueryService queries, SubscriptionCommandService commands) {
+    SubscriptionController(SubscriptionQueryService queries, SubscriptionCommandService commands) {
         this.queries = queries;
         this.commands = commands;
     }
 
-    @GetMapping("/current")
+    /** Público (sin token): lo usa la página de inicio para mostrar los precios (US08). */
+    @GetMapping("/api/v1/plans")
+    @Operation(summary = "Listar los planes (público)",
+            description = "US08: planes con su límite de obras activas y su precio mensual y anual. El anual se "
+                    + "compara con doce pagos mensuales: ahorro en soles y porcentaje de descuento. Todos los planes "
+                    + "tienen las mismas funciones. No requiere sesión.")
+    @ApiResponse(responseCode = "200", description = "Planes en el orden en que se muestran",
+            content = @Content(array = @ArraySchema(schema = @Schema(implementation = PlanResource.class)),
+                    examples = @ExampleObject(value = SubscriptionApiExamples.PLANS)))
+    List<PlanResource> listPlans() {
+        int trialDays = queries.trialDays();
+        return queries.plans().stream().map(plan -> PlanResource.of(plan, trialDays)).toList();
+    }
+
+    @GetMapping("/api/v1/subscriptions/current")
     @PreAuthorize("isAuthenticated()")
+    @SecurityRequirement(name = "bearer")
     @Operation(summary = "Consultar la suscripción de mi organización",
             description = "US11: plan, modalidad (mensual o anual), estado (prueba, activa o vencida), inicio del "
                     + "periodo, próxima fecha de cobro, cambio de modalidad programado y días restantes. Con la "
@@ -67,8 +86,9 @@ class SubscriptionsController {
         return SubscriptionResource.of(queries.current());
     }
 
-    @PostMapping("/checkout")
+    @PostMapping("/api/v1/subscriptions/checkout")
     @PreAuthorize("hasRole('ADMINISTRATOR')")
+    @SecurityRequirement(name = "bearer")
     @Operation(summary = "Pagar un plan (abrir Stripe Checkout)",
             description = "US07 y US09: abre la sesión de pago del plan Plus o Pro en modalidad mensual o anual y "
                     + "devuelve la URL de Stripe Checkout a la que se redirige al administrador. La tarjeta se "
@@ -92,8 +112,10 @@ class SubscriptionsController {
         return ResponseEntity.status(HttpStatus.CREATED).body(CheckoutResource.of(started));
     }
 
-    @PostMapping("/checkout/{sessionId}/simulated-payment")
+    @PostMapping({"/api/v1/subscriptions/checkout/{sessionId}/simulated-payment",
+            "/api/v1/subscriptions/simulated-sessions/{sessionId}/complete"})
     @PreAuthorize("hasRole('ADMINISTRATOR')")
+    @SecurityRequirement(name = "bearer")
     @Operation(summary = "Completar un pago simulado (solo desarrollo local)",
             description = "Modo simulado, sin cuenta de Stripe: completa el pago de la sesión. El servicio arma y "
                     + "firma el mismo evento checkout.session.completed que enviaría Stripe y lo procesa por el "
@@ -113,8 +135,10 @@ class SubscriptionsController {
         return SubscriptionResource.of(queries.current());
     }
 
-    @PutMapping("/current/billing-period")
+    @PutMapping({"/api/v1/subscriptions/current/billing-period",
+            "/api/v1/subscriptions/billing-period"})
     @PreAuthorize("hasRole('ADMINISTRATOR')")
+    @SecurityRequirement(name = "bearer")
     @Operation(summary = "Cambiar entre mensual y anual",
             description = "US12: programa la nueva modalidad para el siguiente periodo de cobro (sin cobro ni "
                     + "prorrateo inmediato). Pedir la modalidad actual cancela un cambio programado. Con Stripe, el "
@@ -133,6 +157,31 @@ class SubscriptionsController {
     BillingPeriodChangeResource changeBillingPeriod(@Valid @RequestBody BillingPeriodRequest request) {
         BillingPeriodChange outcome = commands.changeBillingPeriod(request.billingPeriod());
         return new BillingPeriodChangeResource(outcome, SubscriptionResource.of(queries.current()));
+    }
+
+    @Schema(description = "Plan de suscripción")
+    record PlanResource(PlanCode code, String name, String description,
+            @Schema(description = "Obras activas permitidas; nulo = ilimitadas") Integer maxActiveWorksites,
+            boolean unlimitedWorksites, boolean trialOnly,
+            @Schema(description = "Días de prueba gratuita (solo Free)") Integer trialDays,
+            @Schema(description = "Precio de un mes", example = "299.00") BigDecimal monthlyPrice,
+            @Schema(description = "Precio de un año", example = "2990.00") BigDecimal annualPrice,
+            @Schema(description = "Lo que costarían doce pagos mensuales", example = "3588.00")
+            BigDecimal twelveMonthsPrice,
+            @Schema(description = "Ahorro del pago anual frente a doce mensuales", example = "598.00")
+            BigDecimal annualSavings,
+            @Schema(description = "Descuento del pago anual en porcentaje", example = "16.67")
+            BigDecimal annualDiscountPercent,
+            @Schema(description = "Precio anual dividido entre doce meses", example = "249.17")
+            BigDecimal annualMonthlyEquivalent,
+            String currency) {
+
+        static PlanResource of(Plan plan, int trialDays) {
+            return new PlanResource(plan.code(), plan.name(), plan.description(), plan.maxActiveWorksites(),
+                    plan.unlimited(), plan.trialOnly(), plan.trialOnly() ? trialDays : null, plan.monthlyPrice(),
+                    plan.annualPrice(), plan.twelveMonthsPrice(), plan.annualSavings(), plan.annualDiscountPercent(),
+                    plan.annualPrice().divide(BigDecimal.valueOf(12), 2, RoundingMode.HALF_UP), plan.currency());
+        }
     }
 
     @Schema(description = "Plan y modalidad a pagar")

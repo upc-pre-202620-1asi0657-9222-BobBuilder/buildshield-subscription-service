@@ -8,7 +8,7 @@ import org.springframework.context.annotation.Configuration;
 import pe.buildshield.subscription.application.PaymentGateway;
 
 /**
- * Elige el adaptador de la pasarela: Stripe real, o el modo simulado si el perfil lo permite
+ * Elige el adaptador de la pasarela: Stripe real (StripePaymentAdapter), o el modo simulado si el perfil lo permite
  * ({@code buildshield.payments.simulation-enabled}, solo en local) y no hay {@code STRIPE_SECRET_KEY}.
  */
 @Configuration(proxyBeanMethods = false)
@@ -28,6 +28,6 @@ class PaymentGatewayConfiguration {
         if (PaymentsProperties.blank(properties.stripe().webhookSecret())) {
             log.warn("STRIPE_WEBHOOK_SECRET no está configurada: los webhooks de Stripe se rechazarán");
         }
-        return new StripeAdapter(properties, json, StripeAdapter.defaultCircuitBreaker());
+        return new StripePaymentAdapter(properties, json, StripePaymentAdapter.defaultCircuitBreaker());
     }
 }

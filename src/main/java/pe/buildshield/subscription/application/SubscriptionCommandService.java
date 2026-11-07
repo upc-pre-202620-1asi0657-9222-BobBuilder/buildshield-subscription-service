@@ -13,6 +13,7 @@ import pe.buildshield.subscription.domain.model.BillingPeriod;
 import pe.buildshield.subscription.domain.model.Payment;
 import pe.buildshield.subscription.domain.model.PaymentProvider;
 import pe.buildshield.subscription.domain.model.PaymentRepository;
+import pe.buildshield.subscription.domain.model.PaymentStatus;
 import pe.buildshield.subscription.domain.model.Plan;
 import pe.buildshield.subscription.domain.model.PlanCode;
 import pe.buildshield.subscription.domain.model.PlanRepository;
@@ -43,6 +44,7 @@ import java.util.UUID;
  *   <li>US07 y US09: abrir la sesión de pago del plan Plus o Pro en la modalidad elegida (Stripe Checkout) y
  *       activar la suscripción cuando la pasarela confirma el pago por webhook firmado.</li>
  *   <li>US12: programar el cambio entre mensual y anual para el siguiente periodo de cobro.</li>
+ *   <li>TAREA.md: registrar fallos de pago, actualizar {@code payments} a {@code FAILED} y emitir {@code PaymentFailed}.</li>
  * </ul>
  *
  * Las llamadas a la pasarela se hacen fuera de las transacciones de la base: una pasarela lenta no retiene
@@ -139,8 +141,9 @@ public class SubscriptionCommandService {
         if (subscription.renewsAutomatically(gateway.provider(), now)) {
             subscription.renew(subscription.validUntil());
             Subscription saved = subscriptions.save(subscription);
-            recordRenewalPayment(saved, "simulated-" + saved.id() + "-" + saved.periodEnd(), null, null);
+            Payment renewalPayment = recordRenewalPayment(saved, "simulated-" + saved.id() + "-" + saved.periodEnd(), null, null);
             announce(SubscriptionEvents.SUBSCRIPTION_ACTIVATED, saved, SubscriptionEvents.REASON_RENEWED);
+            announcePayment(SubscriptionEvents.PAYMENT_SUCCEEDED, saved, renewalPayment, null);
             log.info("Suscripción simulada de la organización {} renovada hasta {}", saved.organizationId(),
                     saved.validUntil());
             return true;
@@ -236,6 +239,9 @@ public class SubscriptionCommandService {
             case RENEWAL_PAID -> event.organizationId() == null
                     ? ignore(event, "la factura no trae la organización en los metadatos de la suscripción")
                     : inOrganization(event.organizationId(), () -> renewalPaid(event));
+            case PAYMENT_FAILED -> event.organizationId() == null
+                    ? ignore(event, "el cobro fallido no trae la organización")
+                    : inOrganization(event.organizationId(), () -> paymentFailed(event));
             case IGNORED -> ignore(event, "tipo de evento sin efecto");
         };
     }
@@ -255,6 +261,7 @@ public class SubscriptionCommandService {
         subscription.activate(event.plan(), event.billingPeriod(), clock.instant(), event.gatewaySubscriptionId());
         Subscription saved = subscriptions.save(subscription);
         announce(SubscriptionEvents.SUBSCRIPTION_ACTIVATED, saved, SubscriptionEvents.REASON_PAYMENT_CONFIRMED);
+        announcePayment(SubscriptionEvents.PAYMENT_SUCCEEDED, saved, payment, null);
         log.info("Pago confirmado: organización {} con el plan {} {} hasta {}", saved.organizationId(), saved.plan(),
                 saved.billingPeriod(), saved.validUntil());
         return WebhookResult.PROCESSED;
@@ -286,17 +293,46 @@ public class SubscriptionCommandService {
         }
         boolean periodChanged = subscription.renew(clock.instant(), event.gatewaySubscriptionId());
         Subscription saved = subscriptions.save(subscription);
-        recordRenewalPayment(saved, event.eventId(), event.chargeId(), event.amount());
+        Payment payment = recordRenewalPayment(saved, event.eventId(), event.chargeId(), event.amount());
         announce(SubscriptionEvents.SUBSCRIPTION_ACTIVATED, saved, SubscriptionEvents.REASON_RENEWED);
+        announcePayment(SubscriptionEvents.PAYMENT_SUCCEEDED, saved, payment, null);
         log.info("Renovación cobrada: organización {} hasta {}{}", saved.organizationId(), saved.validUntil(),
                 periodChanged ? " con la nueva modalidad " + saved.billingPeriod() : "");
         return WebhookResult.PROCESSED;
     }
 
+    private WebhookResult paymentFailed(PaymentEvent event) {
+        if (!processedPayments.markProcessed(event.eventId())) {
+            return WebhookResult.DUPLICATE;
+        }
+        Subscription subscription = subscriptions.findCurrent().orElse(null);
+        if (subscription == null) {
+            log.warn("Evento {}: la organización {} no tiene suscripción", event.eventId(), event.organizationId());
+            return WebhookResult.IGNORED;
+        }
+        Payment payment = paymentOf(event).orElse(null);
+        Payment failedPayment;
+        if (payment != null && payment.status() == PaymentStatus.PENDING) {
+            payment.fail(event.failureReason(), event.chargeId());
+            failedPayment = payments.save(payment);
+        } else {
+            BigDecimal amount = event.amount() != null ? event.amount()
+                    : plan(subscription.plan()).price(subscription.billingPeriod() != null ? subscription.billingPeriod() : BillingPeriod.MONTHLY);
+            UUID paymentKey = event.paymentKey() != null ? event.paymentKey()
+                    : UUID.nameUUIDFromBytes(event.eventId().getBytes(StandardCharsets.UTF_8));
+            Payment created = Payment.failed(subscription.id(), subscription.organizationId(), paymentKey,
+                    event.chargeId(), amount, event.failureReason(), clock.instant());
+            failedPayment = payments.save(created);
+        }
+        announcePayment(SubscriptionEvents.PAYMENT_FAILED, subscription, failedPayment, event.failureReason());
+        log.warn("Pago fallido para la organización {}: {}", subscription.organizationId(), event.failureReason());
+        return WebhookResult.PROCESSED;
+    }
+
     /** Registra el cobro de una renovación. La clave se deriva de su origen: el mismo cobro no se registra dos veces. */
-    private void recordRenewalPayment(Subscription subscription, String source, String chargeId, BigDecimal amount) {
+    private Payment recordRenewalPayment(Subscription subscription, String source, String chargeId, BigDecimal amount) {
         BigDecimal charged = amount != null ? amount : plan(subscription.plan()).price(subscription.billingPeriod());
-        payments.save(Payment.paid(subscription.id(), subscription.organizationId(),
+        return payments.save(Payment.paid(subscription.id(), subscription.organizationId(),
                 UUID.nameUUIDFromBytes(source.getBytes(StandardCharsets.UTF_8)), chargeId, charged, clock.instant()));
     }
 
@@ -345,6 +381,15 @@ public class SubscriptionCommandService {
                 subscription.id(), SubscriptionEvents.SubscriptionChanged.of(subscription,
                         plans.findByCode(subscription.plan()).map(Plan::maxActiveWorksites).orElse(null),
                         gateway.provider(), reason));
+    }
+
+    private void announcePayment(String eventType, Subscription subscription, Payment payment, String failureReason) {
+        Integer maxWorksites = plans.findByCode(subscription.plan()).map(Plan::maxActiveWorksites).orElse(null);
+        SubscriptionEvents.PaymentResult payload = failureReason == null
+                ? SubscriptionEvents.PaymentResult.succeeded(subscription, payment, maxWorksites)
+                : SubscriptionEvents.PaymentResult.failed(subscription, payment, maxWorksites, failureReason);
+        outbox.append(subscription.organizationId(), null, eventType, SubscriptionEvents.PAYMENT,
+                payment.id(), payload);
     }
 
     private Subscription currentSubscription() {

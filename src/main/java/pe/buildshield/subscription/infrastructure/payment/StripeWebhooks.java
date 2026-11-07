@@ -30,6 +30,8 @@ import java.util.UUID;
  *       viene en los metadatos de la suscripción, copiados en {@code subscription_details.metadata} o, en versiones
  *       nuevas de la API, en {@code parent.subscription_details.metadata}. La suscripción de Stripe viene en
  *       {@code subscription} o, en versiones nuevas, en {@code parent.subscription_details.subscription}.</li>
+ *   <li>{@code invoice.payment_failed}: fallo de cobro o rechazo de tarjeta. Extrae la organización, la factura, el
+ *       monto y el motivo de fallo para actualizar el cobro a {@code FAILED} y emitir {@code PaymentFailed}.</li>
  *   <li>Cualquier otro: se ignora.</li>
  * </ul>
  */
@@ -39,6 +41,7 @@ class StripeWebhooks implements PaymentWebhooks {
     static final String CHECKOUT_COMPLETED = "checkout.session.completed";
     static final String ASYNC_PAYMENT_SUCCEEDED = "checkout.session.async_payment_succeeded";
     static final String INVOICE_PAID = "invoice.paid";
+    static final String INVOICE_PAYMENT_FAILED = "invoice.payment_failed";
 
     private final PaymentsProperties properties;
     private final ObjectMapper json;
@@ -64,6 +67,7 @@ class StripeWebhooks implements PaymentWebhooks {
         return switch (type) {
             case CHECKOUT_COMPLETED, ASYNC_PAYMENT_SUCCEEDED -> checkout(eventId, type, object);
             case INVOICE_PAID -> invoice(eventId, type, object);
+            case INVOICE_PAYMENT_FAILED -> invoiceFailed(eventId, type, object);
             default -> ignored(eventId, type);
         };
     }
@@ -91,18 +95,60 @@ class StripeWebhooks implements PaymentWebhooks {
             // El primer cobro (subscription_create) ya activó la suscripción con checkout.session.completed.
             return ignored(eventId, type);
         }
-        String organization = text(invoice.path("subscription_details").path("metadata"), "organizationId");
-        if (organization == null) {
-            organization = text(invoice.path("parent").path("subscription_details").path("metadata"), "organizationId");
-        }
-        String subscription = id(invoice, "subscription");
-        if (subscription == null) {
-            subscription = id(invoice.path("parent").path("subscription_details"), "subscription");
-        }
+        String organization = extractOrganization(invoice);
+        String subscription = extractSubscription(invoice);
         JsonNode amountPaid = invoice.path("amount_paid");
         BigDecimal amount = amountPaid.isIntegralNumber() ? amountPaid.decimalValue().movePointLeft(2) : null;
         return PaymentEvent.renewalPaid(eventId, type, uuid(organization), text(invoice, "id"), amount,
                 subscription);
+    }
+
+    private PaymentEvent invoiceFailed(String eventId, String type, JsonNode invoice) {
+        String organization = extractOrganization(invoice);
+        String subscription = extractSubscription(invoice);
+        String key = text(invoice.path("metadata"), "paymentKey");
+        if (key == null) {
+            key = text(invoice.path("subscription_details").path("metadata"), "paymentKey");
+        }
+        if (key == null) {
+            key = text(invoice.path("parent").path("subscription_details").path("metadata"), "paymentKey");
+        }
+        UUID paymentKey = uuid(key);
+        String chargeId = text(invoice, "id");
+        JsonNode amountDue = invoice.path("amount_due");
+        if (!amountDue.isIntegralNumber()) {
+            amountDue = invoice.path("amount_paid");
+        }
+        BigDecimal amount = amountDue.isIntegralNumber() ? amountDue.decimalValue().movePointLeft(2) : null;
+
+        String failureReason = text(invoice.path("last_finalization_error"), "message");
+        if (failureReason == null) {
+            failureReason = text(invoice, "billing_reason");
+        }
+        if (failureReason == null) {
+            failureReason = "Payment failed";
+        }
+        return PaymentEvent.paymentFailed(eventId, type, uuid(organization), paymentKey, chargeId, amount,
+                failureReason, subscription);
+    }
+
+    private static String extractOrganization(JsonNode invoice) {
+        String org = text(invoice.path("subscription_details").path("metadata"), "organizationId");
+        if (org == null) {
+            org = text(invoice.path("parent").path("subscription_details").path("metadata"), "organizationId");
+        }
+        if (org == null) {
+            org = text(invoice.path("metadata"), "organizationId");
+        }
+        return org;
+    }
+
+    private static String extractSubscription(JsonNode invoice) {
+        String subscription = id(invoice, "subscription");
+        if (subscription == null) {
+            subscription = id(invoice.path("parent").path("subscription_details"), "subscription");
+        }
+        return subscription;
     }
 
     private static PaymentEvent ignored(String eventId, String type) {

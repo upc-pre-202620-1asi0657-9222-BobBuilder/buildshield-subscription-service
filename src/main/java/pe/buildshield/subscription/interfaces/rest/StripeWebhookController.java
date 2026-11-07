@@ -17,17 +17,17 @@ import pe.buildshield.subscription.application.SubscriptionCommandService.Webhoo
 import pe.buildshield.subscription.shared.error.ErrorResponse;
 
 /**
- * Webhook de Stripe. Es público (sin JWT): la autenticidad la da la firma {@code Stripe-Signature}. El cuerpo se lee
- * tal cual llega (texto), porque la firma se calcula sobre los bytes exactos.
+ * Webhook de Stripe según C4 (pág. 28). Es público (sin JWT): la autenticidad la da la firma {@code Stripe-Signature}.
+ * El cuerpo se lee tal cual llega (texto), porque la firma se calcula sobre los bytes exactos.
  */
 @RestController
-@RequestMapping("/api/v1/subscriptions/webhooks")
+@RequestMapping({"/api/v1/subscriptions/webhooks", "/api/v1/payments/webhooks"})
 @Tag(name = "Webhooks de pago", description = "T74: notificaciones firmadas de Stripe")
-class PaymentWebhooksController {
+class StripeWebhookController {
 
     private final SubscriptionCommandService commands;
 
-    PaymentWebhooksController(SubscriptionCommandService commands) {
+    StripeWebhookController(SubscriptionCommandService commands) {
         this.commands = commands;
     }
 

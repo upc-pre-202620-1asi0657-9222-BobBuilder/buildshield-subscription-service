@@ -28,7 +28,7 @@ import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
- * Adaptador de Stripe para {@link PaymentGateway}, con la API HTTP de Stripe (formularios
+ * Adaptador de Stripe para {@link PaymentGateway} según C4 (pág. 28), con la API HTTP de Stripe (formularios
  * {@code application/x-www-form-urlencoded} y autenticación con la clave secreta).
  *
  * <ul>
@@ -47,16 +47,16 @@ import java.util.function.Supplier;
  * (Resilience4j): tras fallas seguidas responde de inmediato "no disponible" (503) en vez de esperar a Stripe. Los
  * rechazos 4xx de Stripe (datos o configuración) no abren el circuito. Nunca se envían ni se reciben datos de tarjeta.
  */
-class StripeAdapter implements PaymentGateway {
+class StripePaymentAdapter implements PaymentGateway {
 
-    private static final Logger log = LoggerFactory.getLogger(StripeAdapter.class);
+    private static final Logger log = LoggerFactory.getLogger(StripePaymentAdapter.class);
 
     private final PaymentsProperties properties;
     private final ObjectMapper json;
     private final CircuitBreaker circuitBreaker;
     private final RestClient http;
 
-    StripeAdapter(PaymentsProperties properties, ObjectMapper json, CircuitBreaker circuitBreaker) {
+    StripePaymentAdapter(PaymentsProperties properties, ObjectMapper json, CircuitBreaker circuitBreaker) {
         this.properties = properties;
         this.json = json;
         this.circuitBreaker = circuitBreaker;

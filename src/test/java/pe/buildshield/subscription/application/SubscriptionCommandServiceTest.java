@@ -90,7 +90,7 @@ class SubscriptionCommandServiceTest {
         verify(outbox).append(eq(organization), isNull(), eq("SubscriptionActivated"), eq("SUBSCRIPTION"),
                 eq(trial.id()), eq(new SubscriptionEvents.SubscriptionChanged(organization, trial.id(), "FREE", "TRIAL",
                         trial.validUntil(), null, trial.startedAt(), null, trial.startedAt(), null, null, null, null,
-                        "TRIAL_STARTED")));
+                        "TRIAL_STARTED", null)));
     }
 
     @Test
@@ -168,6 +168,25 @@ class SubscriptionCommandServiceTest {
         clock.advance(Duration.ofMinutes(25));
         assertThat(asAdmin(() -> commands.startCheckout(PlanCode.PLUS, BillingPeriod.ANNUAL)).reused()).isFalse();
         assertThat(charges.byId).hasSize(3);
+    }
+
+    @Test
+    void retry_checkout_with_same_parameters_reuses_pending_payment_and_idempotency_key_without_double_charge() {
+        trial();
+
+        // Primer intento de checkout abre sesión y registra cobro pendiente
+        var first = asAdmin(() -> commands.startCheckout(PlanCode.PLUS, BillingPeriod.MONTHLY));
+        assertThat(first.reused()).isFalse();
+        UUID firstKey = first.payment().idempotencyKey();
+        assertThat(charges.byId).hasSize(1);
+
+        // Reintento inmediato (ej. doble clic o retry del cliente con mismos parámetros)
+        var retry = asAdmin(() -> commands.startCheckout(PlanCode.PLUS, BillingPeriod.MONTHLY));
+        assertThat(retry.reused()).isTrue();
+        assertThat(retry.payment().idempotencyKey()).isEqualTo(firstKey);
+        assertThat(retry.session().sessionId()).isEqualTo(first.session().sessionId());
+        // No se creó un segundo cobro en la base de datos
+        assertThat(charges.byId).hasSize(1);
     }
 
     @Test
@@ -274,6 +293,62 @@ class SubscriptionCommandServiceTest {
         verify(outbox, times(1)).append(eq(organization), isNull(), eq("SubscriptionActivated"), any(), any(),
                 argThat(payload -> ((SubscriptionEvents.SubscriptionChanged) payload).status().equals("ACTIVE")));
         assertThat(TenantContext.current()).isEmpty();
+    }
+
+    @Test
+    void payment_failed_webhook_marks_pending_payment_as_failed_and_publishes_payment_failed() {
+        trial();
+        var started = asAdmin(() -> commands.startCheckout(PlanCode.PLUS, BillingPeriod.ANNUAL));
+        String body = payments.willDeliver(PaymentEvent.paymentFailed("evt_fail_1", "invoice.payment_failed",
+                organization, started.payment().idempotencyKey(), "in_fail_1", new BigDecimal("2990.00"),
+                "Tarjeta rechazada", "sub_1"));
+
+        assertThat(commands.receiveWebhook(body, "ok")).isEqualTo(WebhookResult.PROCESSED);
+
+        Payment failed = charges.byId.get(started.payment().id());
+        assertThat(failed.status()).isEqualTo(PaymentStatus.FAILED);
+        assertThat(failed.failureReason()).isEqualTo("Tarjeta rechazada");
+        assertThat(failed.gatewayChargeId()).isEqualTo("in_fail_1");
+
+        // Webhook repetido es descartado como DUPLICATE
+        assertThat(commands.receiveWebhook(body, "ok")).isEqualTo(WebhookResult.DUPLICATE);
+
+        // Se publicó PaymentFailed al outbox
+        verify(outbox).append(eq(organization), isNull(), eq("PaymentFailed"), eq("PAYMENT"),
+                eq(failed.id()), argThat(payload -> {
+                    var res = (SubscriptionEvents.PaymentResult) payload;
+                    return res.status().equals("FAILED") && "Tarjeta rechazada".equals(res.failureReason())
+                            && res.plan().equals("FREE");
+                }));
+
+        // La suscripción no se activó: sigue en TRIAL
+        assertThat(subscriptions.byOrganization.get(organization).status()).isEqualTo(SubscriptionStatus.TRIAL);
+    }
+
+    @Test
+    void payment_failed_webhook_for_renewal_records_failed_payment_and_publishes_payment_failed() {
+        trial();
+        pay(PlanCode.PLUS, BillingPeriod.MONTHLY, "in_init");
+
+        String body = payments.willDeliver(PaymentEvent.paymentFailed("evt_fail_ren", "invoice.payment_failed",
+                organization, null, "in_fail_ren", new BigDecimal("299.00"),
+                "Fondos insuficientes", "sub_ren"));
+
+        assertThat(commands.receiveWebhook(body, "ok")).isEqualTo(WebhookResult.PROCESSED);
+
+        Payment failed = charges.byId.values().stream()
+                .filter(p -> "in_fail_ren".equals(p.gatewayChargeId()))
+                .findFirst()
+                .orElseThrow();
+        assertThat(failed.status()).isEqualTo(PaymentStatus.FAILED);
+        assertThat(failed.failureReason()).isEqualTo("Fondos insuficientes");
+        assertThat(failed.amount()).isEqualByComparingTo("299.00");
+
+        verify(outbox).append(eq(organization), isNull(), eq("PaymentFailed"), eq("PAYMENT"),
+                eq(failed.id()), argThat(payload -> {
+                    var res = (SubscriptionEvents.PaymentResult) payload;
+                    return res.status().equals("FAILED") && "Fondos insuficientes".equals(res.failureReason());
+                }));
     }
 
     @Test

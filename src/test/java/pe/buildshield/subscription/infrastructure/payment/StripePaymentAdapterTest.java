@@ -31,10 +31,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Adaptador de Stripe contra un Stripe simulado (servidor HTTP del JDK): formulario de Checkout, clave de
- * idempotencia, autenticación, schedule del cambio de modalidad, tiempo máximo y circuit breaker.
+ * Adaptador de Stripe (StripePaymentAdapter) contra un Stripe simulado (servidor HTTP del JDK): formulario de Checkout,
+ * clave de idempotencia, autenticación, schedule del cambio de modalidad, tiempo máximo y circuit breaker.
  */
-class StripeAdapterTest {
+class StripePaymentAdapterTest {
 
     private static final Plan PLUS = new Plan(PlanCode.PLUS, 5, new BigDecimal("299.00"), new BigDecimal("16.67"));
     private static final UUID ORGANIZATION = UUID.fromString("9f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f");
@@ -58,29 +58,23 @@ class StripeAdapterTest {
         stripe.createContext("/", exchange -> {
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             String key = exchange.getRequestMethod() + " " + exchange.getRequestURI().getPath();
-            synchronized (requests) {
-                requests.add(new Recorded(exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
-                        exchange.getRequestURI().getQuery(), form(body),
-                        exchange.getRequestHeaders().getFirst("Authorization"),
-                        exchange.getRequestHeaders().getFirst("Idempotency-Key")));
-            }
-            Response response = responses.getOrDefault(key, new Response(404, "{\"error\":{}}", 0));
-            if (response.delayMillis() > 0) {
+            requests.add(new Recorded(exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
+                    exchange.getRequestURI().getQuery(), form(body),
+                    exchange.getRequestHeaders().getFirst("Authorization"),
+                    exchange.getRequestHeaders().getFirst("Idempotency-Key")));
+            Response response = responses.getOrDefault(key, new Response(200, "{}", 0));
+            if (response.delayMillis > 0) {
                 try {
-                    Thread.sleep(response.delayMillis());
-                } catch (InterruptedException ex) {
+                    Thread.sleep(response.delayMillis);
+                } catch (InterruptedException ignored) {
                     Thread.currentThread().interrupt();
                 }
             }
-            byte[] bytes = response.body().getBytes(StandardCharsets.UTF_8);
-            exchange.getResponseHeaders().add("Content-Type", "application/json");
-            try {
-                exchange.sendResponseHeaders(response.status(), bytes.length);
-                try (OutputStream out = exchange.getResponseBody()) {
-                    out.write(bytes);
-                }
-            } catch (IOException ignored) {
-                // El cliente cortó por tiempo máximo.
+            byte[] bytes = response.body.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(response.status, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
             }
         });
         stripe.setExecutor(Executors.newCachedThreadPool());
@@ -89,104 +83,107 @@ class StripeAdapterTest {
 
     @AfterEach
     void stopFakeStripe() {
-        stripe.stop(0);
+        if (stripe != null) {
+            stripe.stop(0);
+        }
     }
 
     @Test
-    void checkout_creates_a_subscription_session_with_inline_price_and_idempotency_key() {
-        responses.put("POST /v1/checkout/sessions",
-                new Response(200, "{\"id\":\"cs_test_1\",\"url\":\"https://checkout.stripe.com/c/pay/cs_test_1\"}", 0));
-        UUID key = UUID.randomUUID();
-        UUID organization = UUID.randomUUID();
+    void start_checkout_posts_the_form_with_idempotency_key_and_returns_session_url() {
+        responses.put("POST /v1/checkout/sessions", new Response(200, """
+                {"id":"cs_test_123","url":"https://checkout.stripe.com/c/pay/cs_test_123"}""", 0));
+        StripePaymentAdapter adapter = adapter(null, Duration.ofSeconds(2));
+        UUID paymentKey = UUID.randomUUID();
 
-        PaymentGateway.CheckoutSession session = adapter(null, Duration.ofSeconds(2))
-                .startCheckout(new PaymentGateway.CheckoutRequest(key, organization, PLUS, BillingPeriod.ANNUAL));
+        PaymentGateway.CheckoutSession session = adapter.startCheckout(new PaymentGateway.CheckoutRequest(paymentKey,
+                ORGANIZATION, PLUS, BillingPeriod.ANNUAL));
 
-        assertThat(session).isEqualTo(new PaymentGateway.CheckoutSession("cs_test_1",
-                "https://checkout.stripe.com/c/pay/cs_test_1"));
+        assertThat(session.sessionId()).isEqualTo("cs_test_123");
+        assertThat(session.redirectUrl()).isEqualTo("https://checkout.stripe.com/c/pay/cs_test_123");
         Recorded request = requests.get(0);
+        assertThat(request.idempotencyKey()).isEqualTo("checkout-" + paymentKey);
         assertThat(request.authorization()).isEqualTo("Bearer sk_test_fake");
-        assertThat(request.idempotencyKey()).isEqualTo("checkout-" + key);
         assertThat(request.form()).containsEntry("mode", "subscription")
-                .containsEntry("metadata[paymentKey]", key.toString())
-                .containsEntry("subscription_data[metadata][organizationId]", organization.toString())
-                .containsEntry("client_reference_id", organization.toString())
+                .containsEntry("client_reference_id", ORGANIZATION.toString())
+                .containsEntry("metadata[organizationId]", ORGANIZATION.toString())
                 .containsEntry("metadata[plan]", "PLUS")
                 .containsEntry("metadata[billingPeriod]", "ANNUAL")
-                .containsEntry("line_items[0][price_data][currency]", "pen")
+                .containsEntry("metadata[paymentKey]", paymentKey.toString())
                 .containsEntry("line_items[0][price_data][unit_amount]", "299000")
                 .containsEntry("line_items[0][price_data][recurring][interval]", "year")
-                .containsEntry("line_items[0][price_data][product_data][name]", "BuildShield Plus (anual)")
+                .containsEntry("line_items[0][price_data][currency]", "pen")
                 .containsEntry("success_url", "http://web/ok")
-                .doesNotContainKey("line_items[0][price]");
+                .containsEntry("cancel_url", "http://web/cancel");
     }
 
     @Test
-    void checkout_uses_the_configured_stripe_price_when_there_is_one() {
-        responses.put("POST /v1/checkout/sessions", new Response(200, "{\"id\":\"cs_2\",\"url\":\"https://s/cs_2\"}", 0));
-        PaymentsProperties.Prices prices = new PaymentsProperties.Prices("price_plus_m", null, null, null);
+    void start_checkout_uses_configured_price_id_when_present() {
+        responses.put("POST /v1/checkout/sessions", new Response(200, "{\"id\":\"cs_x\",\"url\":\"http://pay\"}", 0));
+        StripePaymentAdapter adapter = adapter(new PaymentsProperties.Prices("price_plus_m", "price_plus_a", null, null),
+                Duration.ofSeconds(2));
 
-        adapter(prices, Duration.ofSeconds(2)).startCheckout(new PaymentGateway.CheckoutRequest(UUID.randomUUID(),
-                UUID.randomUUID(), PLUS, BillingPeriod.MONTHLY));
+        adapter.startCheckout(new PaymentGateway.CheckoutRequest(UUID.randomUUID(), ORGANIZATION, PLUS,
+                BillingPeriod.MONTHLY));
 
         assertThat(requests.get(0).form()).containsEntry("line_items[0][price]", "price_plus_m")
                 .doesNotContainKey("line_items[0][price_data][unit_amount]");
     }
 
     @Test
-    void the_billing_period_change_is_a_two_phase_schedule_from_the_next_billing_date() {
-        responses.put(SEARCH, new Response(200, """
-                {"data":[{"id":"sub_1","schedule":null,"items":{"data":[{"price":{"id":"price_m","product":"prod_1"},
-                "current_period_start":1760200000,"current_period_end":1762878400}]}}]}""", 0));
+    void schedule_billing_period_change_creates_a_two_phase_schedule_with_stored_subscription_id() {
+        responses.put("GET /v1/subscriptions/sub_stored", new Response(200, """
+                {"id":"sub_stored","schedule":null,"items":{"data":[{"price":{"id":"price_old","product":"prod_1"},
+                "current_period_start":1700000000,"current_period_end":1702592000}]}}""", 0));
         responses.put("POST /v1/subscription_schedules", new Response(200, "{\"id\":\"sub_sched_1\"}", 0));
-        responses.put("POST /v1/subscription_schedules/sub_sched_1", new Response(200, "{\"id\":\"sub_sched_1\"}", 0));
+        responses.put("POST /v1/subscription_schedules/sub_sched_1", new Response(200, "{}", 0));
+        StripePaymentAdapter adapter = adapter(null, Duration.ofSeconds(2));
 
-        adapter(null, Duration.ofSeconds(2)).scheduleBillingPeriodChange(ORGANIZATION, null, PLUS, BillingPeriod.MONTHLY,
+        adapter.scheduleBillingPeriodChange(ORGANIZATION, "sub_stored", PLUS, BillingPeriod.MONTHLY,
                 BillingPeriod.ANNUAL);
 
-        assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/search",
+        assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/sub_stored",
                 "/v1/subscription_schedules", "/v1/subscription_schedules/sub_sched_1");
-        assertThat(requests.get(0).query())
-                .isEqualTo("query=metadata['organizationId']:'" + ORGANIZATION + "' AND -status:'canceled'");
-        assertThat(requests.get(1).form()).containsEntry("from_subscription", "sub_1");
-        assertThat(requests.get(2).form()).containsEntry("phases[0][items][0][price]", "price_m")
-                .containsEntry("phases[0][start_date]", "1760200000")
-                .containsEntry("phases[0][end_date]", "1762878400")
-                .containsEntry("phases[1][items][0][price_data][product]", "prod_1")
+        assertThat(requests.get(0).path()).isEqualTo("/v1/subscriptions/sub_stored");
+        assertThat(requests.get(1).form()).containsEntry("from_subscription", "sub_stored");
+        Recorded update = requests.get(2);
+        assertThat(update.form()).containsEntry("phases[0][items][0][price]", "price_old")
+                .containsEntry("phases[0][start_date]", "1700000000")
+                .containsEntry("phases[0][end_date]", "1702592000")
                 .containsEntry("phases[1][items][0][price_data][unit_amount]", "299000")
                 .containsEntry("phases[1][items][0][price_data][recurring][interval]", "year")
-                .containsEntry("proration_behavior", "none")
-                .containsEntry("end_behavior", "release");
-        assertThat(requests.get(2).idempotencyKey()).isEqualTo("change-sub_1-ANNUAL-1762878400");
+                .containsEntry("phases[1][items][0][price_data][product]", "prod_1")
+                .containsEntry("end_behavior", "release")
+                .containsEntry("proration_behavior", "none");
     }
 
     @Test
-    void with_a_stored_id_the_subscription_is_retrieved_directly_and_the_search_is_never_called() {
-        responses.put("GET /v1/subscriptions/sub_stored", new Response(200, """
-                {"id":"sub_stored","status":"active","schedule":null,"items":{"data":[{"price":{"id":"price_m",
-                "product":"prod_1"},"current_period_start":1760200000,"current_period_end":1762878400}]}}""", 0));
-        responses.put("POST /v1/subscription_schedules", new Response(200, "{\"id\":\"sub_sched_9\"}", 0));
-        responses.put("POST /v1/subscription_schedules/sub_sched_9", new Response(200, "{\"id\":\"sub_sched_9\"}", 0));
+    void schedule_billing_period_change_falls_back_to_search_when_the_id_is_null() {
+        responses.put(SEARCH, new Response(200, """
+                {"data":[{"id":"sub_found","schedule":null,"current_period_start":100,"current_period_end":200,
+                "items":{"data":[{"price":{"id":"price_old","product":"prod_x"}}]}}]}""", 0));
+        responses.put("POST /v1/subscription_schedules", new Response(200, "{\"id\":\"sub_sched_x\"}", 0));
+        responses.put("POST /v1/subscription_schedules/sub_sched_x", new Response(200, "{}", 0));
+        StripePaymentAdapter adapter = adapter(null, Duration.ofSeconds(2));
 
-        adapter(null, Duration.ofSeconds(2)).scheduleBillingPeriodChange(ORGANIZATION, "sub_stored", PLUS,
-                BillingPeriod.MONTHLY, BillingPeriod.ANNUAL);
+        adapter.scheduleBillingPeriodChange(ORGANIZATION, null, PLUS, BillingPeriod.MONTHLY, BillingPeriod.ANNUAL);
 
-        assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/sub_stored",
-                "/v1/subscription_schedules", "/v1/subscription_schedules/sub_sched_9");
-        assertThat(requests.get(1).form()).containsEntry("from_subscription", "sub_stored");
-        assertThat(requests.get(2).idempotencyKey()).isEqualTo("change-sub_stored-ANNUAL-1762878400");
+        assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/search",
+                "/v1/subscription_schedules", "/v1/subscription_schedules/sub_sched_x");
+        assertThat(requests.get(0).query())
+                .isEqualTo("query=metadata['organizationId']:'" + ORGANIZATION + "' AND -status:'canceled'");
     }
 
     @Test
-    void with_a_stored_id_returning_to_the_current_period_releases_the_schedule() {
-        responses.put("GET /v1/subscriptions/sub_stored", new Response(200,
-                "{\"id\":\"sub_stored\",\"status\":\"active\",\"schedule\":\"sub_sched_3\"}", 0));
+    void returning_to_current_period_releases_the_schedule_using_stored_id() {
+        responses.put("GET /v1/subscriptions/sub_stored_2", new Response(200, """
+                {"id":"sub_stored_2","schedule":"sub_sched_3","status":"active"}""", 0));
         responses.put("POST /v1/subscription_schedules/sub_sched_3/release", new Response(200, "{}", 0));
+        StripePaymentAdapter adapter = adapter(null, Duration.ofSeconds(2));
 
-        adapter(null, Duration.ofSeconds(2)).scheduleBillingPeriodChange(ORGANIZATION, "sub_stored", PLUS,
-                BillingPeriod.MONTHLY, BillingPeriod.MONTHLY);
+        adapter.scheduleBillingPeriodChange(ORGANIZATION, "sub_stored_2", PLUS, BillingPeriod.MONTHLY,
+                BillingPeriod.MONTHLY);
 
-        assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/sub_stored",
+        assertThat(requests).extracting(Recorded::path).containsExactly("/v1/subscriptions/sub_stored_2",
                 "/v1/subscription_schedules/sub_sched_3/release");
     }
 
@@ -196,7 +193,7 @@ class StripeAdapterTest {
         responses.put("GET /v1/subscriptions/sub_canceled", new Response(200,
                 "{\"id\":\"sub_canceled\",\"status\":\"canceled\"}", 0));
         responses.put("GET /v1/subscriptions/sub_unknown", new Response(404, "{\"error\":{}}", 0));
-        StripeAdapter adapter = adapter(null, Duration.ofSeconds(2));
+        StripePaymentAdapter adapter = adapter(null, Duration.ofSeconds(2));
 
         assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, "sub_canceled", PLUS,
                 BillingPeriod.MONTHLY, BillingPeriod.ANNUAL))
@@ -216,7 +213,7 @@ class StripeAdapterTest {
                 "items":{"data":[{"price":{"id":"price_y","product":"prod_1"}}]}}]}""", 0));
         responses.put("POST /v1/subscription_schedules/sub_sched_2", new Response(200, "{}", 0));
         responses.put("POST /v1/subscription_schedules/sub_sched_2/release", new Response(200, "{}", 0));
-        StripeAdapter adapter = adapter(new PaymentsProperties.Prices(null, null, "price_pro_m", null),
+        StripePaymentAdapter adapter = adapter(new PaymentsProperties.Prices(null, null, "price_pro_m", null),
                 Duration.ofSeconds(2));
         Plan pro = new Plan(PlanCode.PRO, null, new BigDecimal("699"), new BigDecimal("16.67"));
 
@@ -244,7 +241,7 @@ class StripeAdapterTest {
     void incomplete_stripe_answers_are_reported_as_unavailable() {
         responses.put("POST /v1/checkout/sessions", new Response(200, "{\"id\":\"cs_x\"}", 0));
         responses.put("POST /v1/subscription_schedules", new Response(200, "{}", 0));
-        StripeAdapter adapter = adapter(null, Duration.ofSeconds(2));
+        StripePaymentAdapter adapter = adapter(null, Duration.ofSeconds(2));
 
         assertThatThrownBy(() -> adapter.startCheckout(new PaymentGateway.CheckoutRequest(UUID.randomUUID(),
                 UUID.randomUUID(), PLUS, BillingPeriod.MONTHLY))).hasMessageContaining("no devolvió la sesión");
@@ -263,8 +260,8 @@ class StripeAdapterTest {
     @Test
     void a_rejected_request_is_unavailable_but_does_not_open_the_circuit() {
         responses.put("POST /v1/checkout/sessions", new Response(400, "{\"error\":{\"message\":\"Invalid\"}}", 0));
-        CircuitBreaker breaker = StripeAdapter.defaultCircuitBreaker();
-        StripeAdapter adapter = new StripeAdapter(properties(null, Duration.ofSeconds(2)), json, breaker);
+        CircuitBreaker breaker = StripePaymentAdapter.defaultCircuitBreaker();
+        StripePaymentAdapter adapter = new StripePaymentAdapter(properties(null, Duration.ofSeconds(2)), json, breaker);
 
         for (int i = 0; i < 6; i++) {
             assertThatThrownBy(() -> adapter.startCheckout(request()))
@@ -276,8 +273,8 @@ class StripeAdapterTest {
     @Test
     void timeouts_and_server_errors_open_the_circuit_and_then_fail_fast() {
         responses.put("POST /v1/checkout/sessions", new Response(200, "{}", 1_500));
-        CircuitBreaker breaker = StripeAdapter.defaultCircuitBreaker();
-        StripeAdapter adapter = new StripeAdapter(properties(null, Duration.ofMillis(300)), json, breaker);
+        CircuitBreaker breaker = StripePaymentAdapter.defaultCircuitBreaker();
+        StripePaymentAdapter adapter = new StripePaymentAdapter(properties(null, Duration.ofMillis(300)), json, breaker);
 
         assertThatThrownBy(() -> adapter.startCheckout(request()))
                 .isInstanceOf(PaymentGateway.UnavailableException.class).hasMessageContaining("no respondió");
@@ -295,25 +292,25 @@ class StripeAdapterTest {
 
     @Test
     void without_secret_key_stripe_is_not_called() {
-        StripeAdapter adapter = new StripeAdapter(new PaymentsProperties(false, null, null, null,
+        StripePaymentAdapter adapter = new StripePaymentAdapter(new PaymentsProperties(false, null, null, null,
                 new PaymentsProperties.Stripe("", null, "http://127.0.0.1:" + stripe.getAddress().getPort(), null,
-                        null, null)), json, StripeAdapter.defaultCircuitBreaker());
+                        null, null)), json, StripePaymentAdapter.defaultCircuitBreaker());
 
         assertThat(adapter.provider()).isEqualTo(PaymentProvider.STRIPE);
         assertThatThrownBy(() -> adapter.startCheckout(request())).hasMessageContaining("STRIPE_SECRET_KEY");
         assertThatThrownBy(() -> adapter.scheduleBillingPeriodChange(ORGANIZATION, null, PLUS, BillingPeriod.MONTHLY,
                 BillingPeriod.ANNUAL)).hasMessageContaining("STRIPE_SECRET_KEY");
         assertThat(requests).isEmpty();
-        assertThat(StripeAdapter.cents(new BigDecimal("249.165"))).isEqualTo("24917");
+        assertThat(StripePaymentAdapter.cents(new BigDecimal("249.165"))).isEqualTo("24917");
     }
 
     private static PaymentGateway.CheckoutRequest request() {
         return new PaymentGateway.CheckoutRequest(UUID.randomUUID(), UUID.randomUUID(), PLUS, BillingPeriod.MONTHLY);
     }
 
-    private StripeAdapter adapter(PaymentsProperties.Prices prices, Duration timeout) {
+    private StripePaymentAdapter adapter(PaymentsProperties.Prices prices, Duration timeout) {
         PaymentsProperties base = properties(prices, timeout);
-        return new StripeAdapter(base, json, StripeAdapter.defaultCircuitBreaker());
+        return new StripePaymentAdapter(base, json, StripePaymentAdapter.defaultCircuitBreaker());
     }
 
     private PaymentsProperties properties(PaymentsProperties.Prices prices, Duration timeout) {

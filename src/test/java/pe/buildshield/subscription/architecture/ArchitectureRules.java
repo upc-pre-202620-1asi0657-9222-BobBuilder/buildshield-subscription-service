@@ -45,15 +45,27 @@ final class ArchitectureRules {
                 .because("el kernel compartido se copia sin cambios entre servicios");
     }
 
-    /** El dominio es Java puro: no depende de Spring, JPA ni Hibernate. */
+    /** El dominio es Java puro: no depende de Spring, JPA, Hibernate ni Kafka (RNF18). */
     static ArchRule domainIsFrameworkFree(String rootPackage) {
         return noClasses()
                 .that().resideInAPackage(rootPackage + "..domain..")
                 .should().dependOnClassesThat().resideInAnyPackage(
                         "org.springframework..",
                         "jakarta.persistence..",
-                        "org.hibernate..")
+                        "org.hibernate..",
+                        "org.springframework.kafka..",
+                        "org.apache.kafka..")
                 .allowEmptyShould(true)
-                .because("el dominio no depende de Spring ni de JPA");
+                .because("el dominio no depende de Spring, JPA, Hibernate ni Kafka");
+    }
+
+    /** Los controladores (interfaces) no acceden a repositorios ni a persistencia (A.11). */
+    static ArchRule controllersDoNotAccessRepositories(String rootPackage) {
+        return noClasses()
+                .that().resideInAPackage(rootPackage + "..interfaces..")
+                .should().dependOnClassesThat().haveSimpleNameEndingWith("Repository")
+                .orShould().dependOnClassesThat().resideInAPackage(rootPackage + "..infrastructure.persistence..")
+                .allowEmptyShould(true)
+                .because("los controladores usan servicios de aplicación y no acceden a repositorios ni persistencia");
     }
 }
